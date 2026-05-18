@@ -5,16 +5,16 @@ module cxl_controller #(
     parameter int NUM_NODES = 4,
     parameter int RELEASE_SET_DEPTH = 16, // max 16 variables per transaction
     parameter int CXL_TABLE_DEPTH = 32, // max 32 entires in cxl table
-
 )(
     input logic clk_i,
     input logic rst_i,
 
-    // Inputs from hosts/nodes
-    input logic req_valid_i,
-    input logic [1:0] tx_signal_i,
-    input logic [NUM_NODES-1:0] node_id_i,
+    // Input nodes
+    input logic req_valid_i, // handshake signal
+    input logic [1:0] tx_signal_i, // 00: CMD_LOAD, 01: CMD_TX_ABORT, 10: CMD_TX_COMMIT
+    input logic [NUM_NODES-1:0] node_id_i, // one hot bit encoding node id
     input logic [ADDR_W-1:0] load_addr_i, // Used for CMD_LOAD
+    // Release set inputs:
     input logic [RELEASE_SET_DEPTH-1:0] release_valid_i, // release set valid mark
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i, // release set write mark
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i, // release set address
@@ -53,7 +53,7 @@ module cxl_controller #(
         COMP_COMMIT = 2'b11
     } cxl_comp_t;
 
-    // Building Release Set 
+    // ================ Building Release Set ================
     typedef struct packed {
         logic valid;
         logic is_write;
@@ -61,6 +61,7 @@ module cxl_controller #(
         logic [DATA_W-1:0] data;
     } release_entry_t;
     release_entry_t release_set [RELEASE_SET_DEPTH];
+    // Fill in the set from the input
     always_comb begin
         for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
             release_set[i].valid = release_valid_i[i];
@@ -70,14 +71,51 @@ module cxl_controller #(
         end
     end
 
-    // Building CXL Table 
+    // ================ Building CXL Table ================
     typedef struct packed {
-        logic valid;
-        logic [ADDR_W-1:0] addr;
-        logic [NUM_NODES-1:0] checkout_vec;
-        logic [NUM_NODES-1:0] in_progress_vec;
-    } cxl_table_entry_t; 
+        logic valid; // indicate whether the entry is in use
+        logic [ADDR_W-1:0] addr; // indicate cxl address of the entry
+        logic [NUM_NODES-1:0] checkout_vec; // store the checked-out bit for each entry
+        logic [NUM_NODES-1:0] in_progress_vec; // store the in-progress bit for each entry
+        logic locked; // lock for each entry
+    } cxl_table_entry_t;
     cxl_table_entry_t cxl_table [CXL_TABLE_DEPTH];
+
+    // ================ Concurrent Workers ================
+    parameter int NUM_WORKERS = 2;
+    typedef enum logic [1:0] {
+        W_IDLE,
+        W_BUSY,
+        W_DONE
+    } worker_state_t;
+    // These four arrays make up the workers (index-addressable)
+    worker_state_t worker_state [NUM_WORKERS];
+    cxl_cmd_t worker_cmd [NUM_WORKERS];
+    logic [NUM_NODES-1:0] worker_node [NUM_WORKERS];
+    logic [ADDR_W-1:0] worker_load_addr [NUM_WORKERS];
+
+    // Mark idle workers
+    logic [NUM_WORKERS-1:0] worker_idle; 
+    always_comb begin
+        for (int w = 0; w < NUM_WORKERS; w++) begin
+            worker_idle[w] = (worker_state[w] == W_IDLE);
+        end
+    end
+    // Dispatch worker
+    logic dispatch_valid;
+    logic [$clog2(NUM_WORKERS)-1:0] dispatch_idx; // marks which worker was dispatched
+    always_comb begin
+        dispatch_valid = 1'b0;
+        dispatch_idx = '0;
+        for (int w = 0; w < NUM_WORKERS; w++) begin
+            if (!dispatch_valid && worker_idle[w]) begin
+                dispatch_valid = 1'b1;
+                dispatch_idx = w[$clog2(NUM_WORKERS)-1:0];
+            end
+        end
+    end
+    assign req_ready_o = dispatch_valid;
+
 
     // FSM 
     always_comb begin
@@ -90,37 +128,56 @@ module cxl_controller #(
         mem_addr_o = '0;
         mem_wdata_o = '0;
 
-        case (cmd)
-            CMD_LOAD: begin
-                // handle load
-            end
+        if(req_valid_i) begin
+            case (cmd)
+                CMD_LOAD: begin
+                    // handle load
+                    // Add node ID to the entry for that variable in the CXL table. This means the node has checked out the variable
+                    // send variable to node
 
-            CMD_TX_ABORT: begin
-                // handle abort
-            end
+                end
 
-            CMD_TX_COMMIT: begin
-                // handle commit
-            end
+                CMD_TX_ABORT: begin
+                    // handle abort
+                end
 
-            default: begin
-                // default behavior
-            end
-        endcase
+                CMD_TX_COMMIT: begin
+                    // handle commit
+                end
+
+                default: begin
+                    // default behavior
+                end
+            endcase
+        end
+
+        
     end
 
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
-            for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
-                cxl_table[i].valid <= 1'b0;
-                cxl_table[i].addr <= '0;
-                cxl_table[i].checkout_vec <= '0;
-                cxl_table[i].in_progress_vec <= '0;
+            for (int w = 0; w < NUM_WORKERS; w++) begin
+                worker_state[w] <= W_IDLE;
+                worker_cmd[w] <= CMD_LOAD;
+                worker_node_mask[w] <= '0;
+                worker_load_addr[w] <= '0;
             end
         end else begin
-            
-            
-            
+            if (req_valid_i && req_ready_o) begin
+                worker_state[dispatch_idx] <= W_BUSY;
+                worker_cmd[dispatch_idx] <= cmd;
+                worker_node_mask[dispatch_idx] <= node_id_i;
+                worker_load_addr[dispatch_idx] <= load_addr_i;
+            end
+
+            // temporary behavior: workers finish after one cycle
+            for (int w = 0; w < NUM_WORKERS; w++) begin
+                if (worker_state[w] == W_BUSY) begin
+                    worker_state[w] <= W_DONE;
+                end else if (worker_state[w] == W_DONE) begin
+                    worker_state[w] <= W_IDLE;
+                end
+            end
         end
     end
 
