@@ -24,7 +24,7 @@ module cxl_controller #(
     input logic [DATA_W-1:0] mem_rdata_i,
 
     // Outputs to hosts/nodes
-    output logic req_ready_o,
+    output logic req_ready_o, // tell the host that CXL controller is ready to accept a new request
     output logic resp_valid_o,
     output logic [1:0] comp_signal_o,
     output logic [DATA_W-1:0] load_data_o,
@@ -91,14 +91,15 @@ module cxl_controller #(
     // These four arrays make up the workers (index-addressable)
     worker_state_t worker_state [NUM_WORKERS];
     cxl_cmd_t worker_cmd [NUM_WORKERS];
-    logic [NUM_NODES-1:0] worker_node [NUM_WORKERS];
+    logic [NUM_NODES-1:0] worker_node_id [NUM_WORKERS];
     logic [ADDR_W-1:0] worker_load_addr [NUM_WORKERS];
+    release_entry_t worker_release_set [NUM_WORKERS][RELEASE_SET_DEPTH];
 
     // Mark idle workers
     logic [NUM_WORKERS-1:0] worker_idle; 
     always_comb begin
-        for (int w = 0; w < NUM_WORKERS; w++) begin
-            worker_idle[w] = (worker_state[w] == W_IDLE);
+        for (int i = 0; i < NUM_WORKERS; i++) begin
+            worker_idle[i] = (worker_state[i] == W_IDLE);
         end
     end
     // Dispatch worker
@@ -107,77 +108,62 @@ module cxl_controller #(
     always_comb begin
         dispatch_valid = 1'b0;
         dispatch_idx = '0;
-        for (int w = 0; w < NUM_WORKERS; w++) begin
-            if (!dispatch_valid && worker_idle[w]) begin
+        // mark first available worker as available
+        for (int i = 0; i < NUM_WORKERS; w++) begin
+            if (!dispatch_valid && worker_idle[i]) begin
                 dispatch_valid = 1'b1;
-                dispatch_idx = w[$clog2(NUM_WORKERS)-1:0];
+                dispatch_idx = i[$clog2(NUM_WORKERS)-1:0];
             end
         end
     end
     assign req_ready_o = dispatch_valid;
 
-
-    // FSM 
+    // Combinational Logic
     always_comb begin
-        req_ready_o = 1'b1;
-        resp_valid_o = 1'b0;
-        comp_signal_o = COMP_NONE;
-        load_data_o = '0;
-        mem_req_valid_o = 1'b0;
-        mem_we_o = 1'b0;
-        mem_addr_o = '0;
-        mem_wdata_o = '0;
+        for (int i = 0; i < NUM_WORKERS; i++) begin
+            if (worker_state[i] == W_BUSY) begin
+                case (worker_cmd[i])
 
-        if(req_valid_i) begin
-            case (cmd)
-                CMD_LOAD: begin
-                    // handle load
-                    // Add node ID to the entry for that variable in the CXL table. This means the node has checked out the variable
-                    // send variable to node
+                    CMD_LOAD: begin
+                        // 
+                    end
 
-                end
+                    CMD_TX_ABORT: begin
+                        // 
+                    end
 
-                CMD_TX_ABORT: begin
-                    // handle abort
-                end
+                    CMD_TX_COMMIT: begin
+                        // 
+                    end
 
-                CMD_TX_COMMIT: begin
-                    // handle commit
-                end
+                    default:
 
-                default: begin
-                    // default behavior
-                end
-            endcase
+                endcase
+            end
         end
-
-        
     end
 
+    // Sequential Logic
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
-            for (int w = 0; w < NUM_WORKERS; w++) begin
-                worker_state[w] <= W_IDLE;
-                worker_cmd[w] <= CMD_LOAD;
-                worker_node_mask[w] <= '0;
-                worker_load_addr[w] <= '0;
+            for (int i = 0; i < NUM_WORKERS; i++) begin
+                worker_state[i] <= W_IDLE;
+                worker_cmd[i] <= CMD_LOAD;
+                worker_node_id[i] <= '0;
+                worker_load_addr[i] <= '0;
             end
         end else begin
+            // Assign work to dispatched worker
             if (req_valid_i && req_ready_o) begin
                 worker_state[dispatch_idx] <= W_BUSY;
                 worker_cmd[dispatch_idx] <= cmd;
-                worker_node_mask[dispatch_idx] <= node_id_i;
+                worker_node_id[dispatch_idx] <= node_id_i;
                 worker_load_addr[dispatch_idx] <= load_addr_i;
-            end
-
-            // temporary behavior: workers finish after one cycle
-            for (int w = 0; w < NUM_WORKERS; w++) begin
-                if (worker_state[w] == W_BUSY) begin
-                    worker_state[w] <= W_DONE;
-                end else if (worker_state[w] == W_DONE) begin
-                    worker_state[w] <= W_IDLE;
+                for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
+                    worker_release_set[dispatch_idx][i] <= release_set[i];
                 end
             end
+
         end
     end
 
