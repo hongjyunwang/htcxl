@@ -64,7 +64,7 @@ module tb_cxl_controller;
     // Watchdog so a stalled FSM doesn't hang the sim forever
     initial begin
         #2000;
-        $display("[%0t] *** TIMEOUT — FSM likely stalled (expected for now in W_MEM_REQ) ***", $time);
+        $display("[%0t] *** TIMEOUT — FSM likely stalled ***", $time);
         $finish;
     end
 
