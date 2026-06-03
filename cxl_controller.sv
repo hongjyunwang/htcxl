@@ -151,6 +151,8 @@ module cxl_controller #(
     // Flags for output arbiter
     logic found_mem;
     logic found_resp;
+    logic node_resp_served [NUM_WORKERS];
+    logic mem_resp_served [NUM_WORKERS];
 
     // Parallel comparators (workers) for each CXL Table entry
     always_comb begin
@@ -166,6 +168,9 @@ module cxl_controller #(
             local_has_free[w] = 1'b0;
             local_hit_idx[w] = '0;
             local_free_idx[w] = '0;
+
+            mem_resp_served[w] = 1'b0;
+            node_resp_served[w] = 1'b0;
 
             case (worker_state[w])
 
@@ -202,7 +207,7 @@ module cxl_controller #(
                             if (local_hit[w]) begin
                                 cxl_upd_alloc[w] = 1'b0;
                                 cxl_upd_idx[w] = local_hit_idx[w];
-                                worker_next_state[w] = W_MEM_REQ; // Is this right?
+                                worker_next_state[w] = W_MEM_REQ;
                             // if not found, assign free entry and initiate load
                             end else if (local_has_free[w]) begin
                                 cxl_upd_alloc[w] = 1'b1;
@@ -226,25 +231,30 @@ module cxl_controller #(
 
                 W_MEM_REQ: begin
                     // $display("[%0t] CXL_CONTROLLER: worker[%0d] in W_MEM_REQ state", $time, w);
-                    worker_next_state[w] = W_MEM_WAIT;
+                    if (mem_resp_served[w]) begin
+                        worker_next_state[w] = W_MEM_WAIT;
+                    end else begin
+                        worker_next_state[w] = W_MEM_REQ;
+                    end
                 end
 
                 W_MEM_WAIT: begin
-                    if(mem_rvalid_i) begin
-                        // signal to update cxl table
+                    if (mem_rvalid_i) begin
                         cxl_upd_en[w] = 1'b1;
                         worker_next_state[w] = W_RESPOND;
-                    end
-                    else begin
-                        worker_next_state[w] = W_MEM_WAIT; // wait until received
+                    end else begin
+                        worker_next_state[w] = W_MEM_WAIT;
                     end
                 end
 
                 W_RESPOND: begin
-                    // Return to IDLE after response to node
-                    worker_next_state[w] = W_IDLE;
+                    if (node_resp_served[w]) begin
+                        // only transition to idle when response served
+                        worker_next_state[w] = W_IDLE;
+                    end else begin
+                        worker_next_state[w] = W_RESPOND;
+                    end
                 end
-
 
                 default: begin
                     worker_next_state[w] = W_IDLE;
@@ -265,13 +275,24 @@ module cxl_controller #(
         found_mem = 1'b0;
         found_resp = 1'b0;
 
-        // pick first worker in W_MEM_REQ
+        // check if any worker is already in W_MEM_WAIT
+        logic any_mem_wait;
+        any_mem_wait = 1'b0;
         for (int w = 0; w < NUM_WORKERS; w++) begin
-            if (!found_mem && worker_state[w] == W_MEM_REQ) begin
+            if (worker_state[w] == W_MEM_WAIT) begin
+                any_mem_wait = 1'b1;
+            end
+        end
+
+        // pick first worker in W_MEM_REQ, only if no worker is already waiting
+        for (int w = 0; w < NUM_WORKERS; w++) begin
+            // only send request if there is no one else waiting for a request
+            if (!found_mem && !any_mem_wait && worker_state[w] == W_MEM_REQ) begin
                 mem_req_valid_o = 1;
                 mem_we_o = 0;
                 mem_addr_o = worker_load_addr[w];
                 found_mem = 1'b1;
+                mem_req_served[w] = 1'b1;
             end
         end
 
@@ -282,6 +303,7 @@ module cxl_controller #(
                 comp_signal_o = COMP_LOAD_DONE;
                 load_data_o = worker_resp_data[w];
                 found_resp = 1'b1;
+                node_resp_served[w] = 1'b1;
             end
         end
 
