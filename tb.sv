@@ -17,17 +17,16 @@ module tb_cxl_controller;
 
     logic clk, rst;
 
-    logic req_valid;
+    logic [NUM_NODES-1:0] req_valid;
     logic [1:0] tx_signal;
-    logic [NUM_NODES-1:0] node_id;
     logic [ADDR_W-1:0] load_addr;
     logic [RELEASE_SET_DEPTH-1:0] release_valid;
     logic [RELEASE_SET_DEPTH-1:0] release_is_write;
     logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr;
     logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data;
 
-    logic req_ready;
-    logic resp_valid;
+    logic [NUM_NODES-1:0] req_ready;
+    logic [NUM_NODES-1:0] resp_valid;
     logic [1:0] comp_signal;
     logic [DATA_W-1:0] load_data;
 
@@ -44,14 +43,13 @@ module tb_cxl_controller;
         .rst_i(rst),
         .req_valid_i(req_valid), 
         .tx_signal_i(tx_signal),
-        .node_id_i(node_id), 
         .load_addr_i(load_addr),
         .release_valid_i(release_valid), 
         .release_is_write_i(release_is_write),
         .release_addr_i(release_addr), 
         .release_data_i(release_data),
 
-        .req_ready_o(req_ready), 
+        .req_ready_o(req_ready),
         .resp_valid_o(resp_valid),
         .comp_signal_o(comp_signal), 
         .load_data_o(load_data)
@@ -74,28 +72,29 @@ module tb_cxl_controller;
         input logic [NUM_NODES-1:0] node,
         input logic [ADDR_W-1:0] addr
     );
-
-        $display("[%0t] TB: Begin attempting request (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
-
-        req_valid = 1'b1;
+        req_valid = node;
         tx_signal = cmd;
-        node_id = node;
         load_addr = addr;
 
-        // Wait at negedge (signals stable) until the controller is ready
         @(negedge clk);
-        while (!req_ready) @(negedge clk);
+        while (!(req_ready & node)) @(negedge clk);
 
-        // req_ready is high; the next posedge is where the controller dispatches
         @(posedge clk);
-        req_valid = 1'b0;
+        @(negedge clk);
+        req_valid = '0;
 
         $display("[%0t] TB: request accepted (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
+
+        // Wait for response on this node's resp_valid bit
+        @(negedge clk);
+        while (!(resp_valid & node)) @(negedge clk);
+
+        $display("[%0t] TB: response received (node=%b comp=%0d data=%0h)", $time, node, comp_signal, load_data);
     endtask
 
     initial begin
         // Init all inputs
-        req_valid = 0; tx_signal = 0; node_id = 0; load_addr = 0;
+        req_valid = '0; tx_signal = 0; load_addr = 0;
         release_valid = 0; release_is_write = 0; release_addr = 0; release_data = 0;
 
         // Reset
@@ -110,6 +109,17 @@ module tb_cxl_controller;
 
         // Issue LOAD: node 1 (one-hot 0001), address 5
         issue_request(CMD_LOAD, 4'b0001, 64'd5);
+
+        // repeat(5) begin
+        // @(posedge clk);
+        // $display("[%0t] state=%0d load_addr=%0d mem_req_valid=%b any_mem_wait=%b mem_rvalid=%b",
+        //     $time,
+        //     top_inst.dut.worker_state[0],
+        //     top_inst.dut.worker_load_addr[0],
+        //     top_inst.mem_req_valid,
+        //     top_inst.dut.any_mem_wait,
+        //     top_inst.mem_rvalid);
+        // end
 
         // Let it run so the state trace prints
         repeat (12) @(posedge clk);

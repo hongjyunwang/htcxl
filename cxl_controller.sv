@@ -12,9 +12,8 @@ module cxl_controller #(
     input logic rst_i,
 
     // Input nodes
-    input logic req_valid_i, // handshake signal
+    input logic [NUM_NODES-1:0] req_valid_i, // handshake signal specific for each node, also encodes the requesting node's id
     input logic [1:0] tx_signal_i, // 00: CMD_LOAD, 01: CMD_TX_ABORT, 10: CMD_TX_COMMIT
-    input logic [NUM_NODES-1:0] node_id_i, // one hot bit encoding the node(s) sending the request
     input logic [ADDR_W-1:0] load_addr_i, // Used for CMD_LOAD
 
     // Release set inputs:
@@ -22,14 +21,14 @@ module cxl_controller #(
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i, // release set write mark
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i, // release set address
     input logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_i, // release set data
-    
+
     // Inputs from CXL memory pool
     input logic mem_rvalid_i,
     input logic [DATA_W-1:0] mem_rdata_i,
 
     // Outputs to hosts/nodes
-    output logic req_ready_o, // tell the host that CXL controller is ready to accept a new request
-    output logic resp_valid_o, // handshake to signal completed request
+    output logic [NUM_NODES-1:0] req_ready_o, // tell the host that CXL controller is ready to accept a new request
+    output logic [NUM_NODES-1:0] resp_valid_o, // handshake to signal completed request
     output logic [1:0] comp_signal_o,
     output logic [DATA_W-1:0] load_data_o,
 
@@ -39,8 +38,7 @@ module cxl_controller #(
     output logic [ADDR_W-1:0] mem_addr_o,
     output logic [DATA_W-1:0] mem_wdata_o
 );
-
-    parameter int NUM_WORKERS = 2;
+    localparam int NUM_WORKERS = NUM_NODES;
 
     // Command encoding
     typedef enum logic [1:0] {
@@ -69,7 +67,6 @@ module cxl_controller #(
     // Each worker independently queries the shared CXL Table.
     // Reads are non-conflicting (purely combinational); only writes (in always_ff) need arbitration via the locked field.
     localparam int CXL_IDX_W = $clog2(CXL_TABLE_DEPTH);
-    localparam int WORKER_IDX_W = $clog2(NUM_WORKERS);
 
     // state of each worker
     typedef enum logic [2:0] {
@@ -81,6 +78,7 @@ module cxl_controller #(
 
         W_ABORT_CXL_UPDATE
     } worker_state_t;
+
     // These four arrays make up the workers (index-addressable)
     worker_state_t worker_state [NUM_WORKERS];
     worker_state_t worker_next_state [NUM_WORKERS];
@@ -93,28 +91,24 @@ module cxl_controller #(
     logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] worker_release_addr [NUM_WORKERS];
     logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] worker_release_data [NUM_WORKERS];
 
-    // Mark idle workers and dispatch worker
-    logic [NUM_WORKERS-1:0] worker_idle;
-    logic dispatch_valid;
-    logic [$clog2(NUM_WORKERS)-1:0] dispatch_idx; // marks which worker was dispatched
-    always_comb begin
-
-        // Mark idle workers
-        for (int i = 0; i < NUM_WORKERS; i++) begin
-            worker_idle[i] = (worker_state[i] == W_IDLE);
+    // Accept request from a node when its assigned worker is idle
+    genvar i;
+    generate
+        for (i = 0; i < NUM_NODES; i++) begin : gen_req_ready
+            assign req_ready_o[i] = (worker_state[i] == W_IDLE);
         end
+    endgenerate
 
-        // mark first available worker as available (dispatched)
-        dispatch_valid = 1'b0;
-        dispatch_idx = '0;
-        for (int i = 0; i < NUM_WORKERS; i++) begin
-            if (!dispatch_valid && worker_idle[i]) begin
-                dispatch_valid = 1'b1;
-                dispatch_idx = i;
+    // Convert req_valid_i to the index needed to access the requesting node's corresponding worker
+    logic [$clog2(NUM_NODES)-1:0] active_worker_idx;
+    always_comb begin
+        active_worker_idx = '0;
+        for (int i = 0; i < NUM_NODES; i++) begin
+            if (req_valid_i[i]) begin
+                active_worker_idx = ($clog2(NUM_NODES))'(i);
             end
         end
     end
-    assign req_ready_o = dispatch_valid;
 
     // Drive CAM query inputs from each worker's state
     logic cxl_upd_en [NUM_WORKERS]; // signal cxl table update
@@ -135,19 +129,26 @@ module cxl_controller #(
     logic [DATA_W-1:0] worker_resp_data [NUM_WORKERS];
 
     // Flags for output arbiter
-    logic found_mem;
-    logic found_resp;
-    logic node_resp_served [NUM_WORKERS];
-    logic mem_resp_served [NUM_WORKERS];
-    logic any_mem_wait;
+    // logic found_mem;
+    // logic found_resp;
+    // logic node_resp_served [NUM_WORKERS];
+    // logic mem_resp_served [NUM_WORKERS];
+    // logic any_mem_wait;
 
     // registers for release operation
    logic [CXL_TABLE_DEPTH-1:0] local_release_mask [NUM_WORKERS]; // marks cxl table entries to free
    logic [CXL_TABLE_DEPTH-1:0] worker_release_mask [NUM_WORKERS]; // latch for worker across states
    logic [CXL_IDX_W-1:0] worker_release_ptr [NUM_WORKERS]; // tracker to track which cxl table entries have been freed
 
-    // Parallel comparators (workers) for each CXL Table entry
+    // Combinational Logic
     always_comb begin
+        resp_valid_o = '0;
+        comp_signal_o = '0;
+        load_data_o = '0;
+        mem_req_valid_o = 0;
+        mem_we_o = 0;
+        mem_addr_o = '0;
+        
         for (int w = 0; w < NUM_WORKERS; w++) begin
             // Defaults
             cxl_upd_en[w] = 1'b0;
@@ -158,8 +159,6 @@ module cxl_controller #(
             local_has_free[w] = 1'b0;
             local_hit_idx[w] = '0;
             local_free_idx[w] = '0;
-            mem_resp_served[w] = 1'b0;
-            node_resp_served[w] = 1'b0;
             local_release_mask[w] = '0;
 
             case (worker_state[w])
@@ -167,7 +166,7 @@ module cxl_controller #(
                 W_IDLE: begin
                     // $display("[%0t] CXL_CONTROLLER: worker[%0d] in W_IDLE state", $time, w);
                     // Stay idle until dispatched by sequential logic
-                    if (req_valid_i && req_ready_o && (w == dispatch_idx)) begin
+                    if (req_valid_i[w] && req_ready_o[w]) begin
                         worker_next_state[w] = W_CXL_QUERY;
                     end else begin
                         worker_next_state[w] = W_IDLE;
@@ -239,12 +238,10 @@ module cxl_controller #(
                 end
 
                 W_MEM_REQ: begin
-                    // $display("[%0t] CXL_CONTROLLER: worker[%0d] in W_MEM_REQ state", $time, w);
-                    if (mem_resp_served[w]) begin
-                        worker_next_state[w] = W_MEM_WAIT;
-                    end else begin
-                        worker_next_state[w] = W_MEM_REQ;
-                    end
+                    mem_req_valid_o = 1;
+                    mem_we_o = 0;
+                    mem_addr_o = worker_load_addr[w];
+                    worker_next_state[w] = W_MEM_WAIT;
                 end
 
                 W_MEM_WAIT: begin
@@ -257,12 +254,22 @@ module cxl_controller #(
                 end
 
                 W_RESPOND: begin
-                    if (node_resp_served[w]) begin
-                        // only transition to idle when response served
-                        worker_next_state[w] = W_IDLE;
-                    end else begin
-                        worker_next_state[w] = W_RESPOND;
-                    end
+                    resp_valid_o[w] = 1;  // only assert the bit for this worker's node
+                    worker_next_state[w] = W_IDLE;
+                    case (worker_cmd[w])
+                        CMD_LOAD: begin
+                            comp_signal_o = COMP_LOAD_DONE;
+                            load_data_o = worker_resp_data[w];
+                        end
+                        CMD_TX_ABORT: begin
+                            comp_signal_o = COMP_ABORT;
+                            load_data_o = '0;
+                        end
+                        default: begin
+                            comp_signal_o = COMP_NONE;
+                            load_data_o = '0;
+                        end
+                    endcase
                 end
 
                 W_ABORT_CXL_UPDATE: begin
@@ -284,60 +291,52 @@ module cxl_controller #(
             endcase
         end
 
-        // Output arbitration: lowest worker index priority scan
+        // Output arbitration
 
-        // defaults
-        resp_valid_o = 0;
-        comp_signal_o = '0;
-        load_data_o = '0;
-        mem_req_valid_o = 0;
-        mem_we_o = 0;
-        mem_addr_o = '0;
-        found_mem = 1'b0;
-        found_resp = 1'b0;
+        // // check if any worker is already in W_MEM_WAIT
+        // any_mem_wait = 1'b0;
+        // for (int w = 0; w < NUM_WORKERS; w++) begin
+        //     if (worker_state[w] == W_MEM_WAIT) begin
+        //         any_mem_wait = 1'b1;
+        //     end
+        // end
 
-        // check if any worker is already in W_MEM_WAIT
-        any_mem_wait = 1'b0;
-        for (int w = 0; w < NUM_WORKERS; w++) begin
-            if (worker_state[w] == W_MEM_WAIT) begin
-                any_mem_wait = 1'b1;
-            end
-        end
+        // // pick first worker in W_MEM_REQ, only if no worker is already waiting
+        // for (int w = 0; w < NUM_WORKERS; w++) begin
+        //     // only send request if there is no one else waiting for a request
+        //     if (!found_mem && !any_mem_wait && worker_state[w] == W_MEM_REQ) begin
+        //         $display("[%0t] CXL_CONTROLLER: arbiter serving worker[%0d] mem_req, setting mem_resp_served=1", $time, w);
+        //         mem_req_valid_o = 1;
+        //         mem_we_o = 0;
+        //         mem_addr_o = worker_load_addr[w];
+        //         found_mem = 1'b1;
+        //         mem_resp_served[w] = 1'b1;
+        //     end
+        // end
 
-        // pick first worker in W_MEM_REQ, only if no worker is already waiting
-        for (int w = 0; w < NUM_WORKERS; w++) begin
-            // only send request if there is no one else waiting for a request
-            if (!found_mem && !any_mem_wait && worker_state[w] == W_MEM_REQ) begin
-                mem_req_valid_o = 1;
-                mem_we_o = 0;
-                mem_addr_o = worker_load_addr[w];
-                found_mem = 1'b1;
-                mem_resp_served[w] = 1'b1;
-            end
-        end
-
-        // pick first worker in W_RESPOND
-        for (int w = 0; w < NUM_WORKERS; w++) begin
-            if (!found_resp && worker_state[w] == W_RESPOND) begin
-                resp_valid_o = 1;
-                found_resp = 1'b1;
-                node_resp_served[w] = 1'b1;
-                case (worker_cmd[w])
-                    CMD_LOAD: begin // completed load
-                        comp_signal_o = COMP_LOAD_DONE;
-                        load_data_o = worker_resp_data[w];
-                    end
-                    CMD_TX_ABORT: begin // completed tx_abort
-                        comp_signal_o = COMP_ABORT;
-                        load_data_o = '0;
-                    end
-                    default: begin
-                        comp_signal_o = COMP_NONE;
-                        load_data_o = '0;
-                    end
-                endcase
-            end
-        end
+        // // pick first worker in W_RESPOND
+        // for (int w = 0; w < NUM_WORKERS; w++) begin
+        //     if (!found_resp && worker_state[w] == W_RESPOND) begin
+        //         $display("[%0t] CXL_CONTROLLER: arbiter serving worker[%0d] response, setting node_resp_served=1", $time, w);
+        //         resp_valid_o = 1;
+        //         found_resp = 1'b1;
+        //         node_resp_served[w] = 1'b1;
+        //         case (worker_cmd[w])
+        //             CMD_LOAD: begin // completed load
+        //                 comp_signal_o = COMP_LOAD_DONE;
+        //                 load_data_o = worker_resp_data[w];
+        //             end
+        //             CMD_TX_ABORT: begin // completed tx_abort
+        //                 comp_signal_o = COMP_ABORT;
+        //                 load_data_o = '0;
+        //             end
+        //             default: begin
+        //                 comp_signal_o = COMP_NONE;
+        //                 load_data_o = '0;
+        //             end
+        //         endcase
+        //     end
+        // end
 
     end
 
@@ -357,6 +356,8 @@ module cxl_controller #(
                 worker_release_is_write[i] <= '0;
                 worker_release_addr[i] <= '0;
                 worker_release_data[i] <= '0;
+                worker_release_ptr[i] <= '0;
+                worker_release_mask[i] <= '0;
             end
             for (int e = 0; e < CXL_TABLE_DEPTH; e++) begin
                 cxl_table_valid[e] <= 1'b0;
@@ -366,18 +367,17 @@ module cxl_controller #(
                 cxl_table_locked[e] <= 1'b0;
             end
         end else begin
-            // Assign request to the dispatched worker
-            // Latch worker fields with request information from nodes
-            if (req_valid_i && req_ready_o) begin
-                worker_cmd[dispatch_idx] <= cmd;
-                worker_node_id[dispatch_idx] <= node_id_i;
-                worker_load_addr[dispatch_idx] <= load_addr_i;
-                for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
-                    worker_release_valid[dispatch_idx] <= release_valid_i;
-                    worker_release_is_write[dispatch_idx] <= release_is_write_i;
-                    worker_release_addr[dispatch_idx] <= release_addr_i;
-                    worker_release_data[dispatch_idx] <= release_data_i;
-                end
+            
+            // Latch worker fields with request information from nodes to the active worker
+            // Worker can begin work when there is a request and the worker is idle
+            if (req_valid_i[active_worker_idx] && req_ready_o[active_worker_idx]) begin
+                worker_cmd[active_worker_idx] <= cmd;
+                worker_load_addr[active_worker_idx] <= load_addr_i;
+                worker_node_id[active_worker_idx] <= req_valid_i;
+                worker_release_valid[active_worker_idx] <= release_valid_i;
+                worker_release_is_write[active_worker_idx] <= release_is_write_i;
+                worker_release_addr[active_worker_idx] <= release_addr_i;
+                worker_release_data[active_worker_idx] <= release_data_i;
             end
 
             for (int w = 0; w < NUM_WORKERS; w++) begin

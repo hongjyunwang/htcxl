@@ -11,17 +11,16 @@ module top #(
     input logic clk_i,
     input logic rst_i,
 
-    input logic req_valid_i,
+    input logic [NUM_NODES-1:0] req_valid_i,
     input logic [1:0] tx_signal_i,
-    input logic [NUM_NODES-1:0] node_id_i,
     input logic [ADDR_W-1:0] load_addr_i,
     input logic [RELEASE_SET_DEPTH-1:0] release_valid_i,
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i,
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i,
     input logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_i,
 
-    output logic req_ready_o,
-    output logic resp_valid_o,
+    output logic [NUM_NODES-1:0] req_ready_o,
+    output logic [NUM_NODES-1:0] resp_valid_o,
     output logic [1:0] comp_signal_o,
     output logic [DATA_W-1:0] load_data_o
 );
@@ -47,7 +46,6 @@ module top #(
 
         .req_valid_i(req_valid_i),
         .tx_signal_i(tx_signal_i),
-        .node_id_i(node_id_i),
         .load_addr_i(load_addr_i),
         .release_valid_i(release_valid_i),
         .release_is_write_i(release_is_write_i),
