@@ -72,22 +72,24 @@ module tb_cxl_controller;
         input logic [NUM_NODES-1:0] node,
         input logic [ADDR_W-1:0] addr
     );
+        // Wait until controller is ready
+        @(negedge clk);
+        while (!req_ready) @(negedge clk);
+
+        // Drive inputs
         req_valid = node;
         tx_signal = cmd;
         load_addr = addr;
 
-        @(negedge clk);
-        while (!(req_ready & node)) @(negedge clk);
-
+        // Hold for one cycle then deassert
         @(posedge clk);
         @(negedge clk);
         req_valid = '0;
 
-        $display("[%0t] TB: request accepted (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
+        $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
 
-        // Wait for response on this node's resp_valid bit
-        @(negedge clk);
-        while (!(resp_valid & node)) @(negedge clk);
+        // Wait for response
+        while (!resp_valid) @(negedge clk);
 
         $display("[%0t] TB: response received (node=%b comp=%0d data=%0h)", $time, node, comp_signal, load_data);
     endtask
@@ -102,6 +104,27 @@ module tb_cxl_controller;
         repeat (4) @(posedge clk);
         rst = 1'b0;
         @(posedge clk);
+
+        // // Debug trace
+        // fork
+        //     begin
+        //         repeat(50) begin
+        //             @(posedge clk);
+        //             $display("[%0t] ready=%b req_valid=%b mem_req_valid=%b mem_rvalid=%b resp_valid=%b comp=%b ctrl_ready=%b",
+        //                 $time,
+        //                 req_ready,
+        //                 req_valid,
+        //                 top_inst.mem_req_valid,
+        //                 top_inst.mem_rvalid,
+        //                 resp_valid,
+        //                 comp_signal,
+        //                 top_inst.dut.ctrl_ready_q
+        //             );
+        //         end
+        //     end
+        // join_none
+
+        issue_request(CMD_LOAD, 4'b0001, 64'd5);
 
         // Preload memory at address 5
         top_inst.mem.mem[5] = 64'hDEAD_BEEF_0000_0001;
