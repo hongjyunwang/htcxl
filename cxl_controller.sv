@@ -81,6 +81,7 @@ module cxl_controller #(
     // ================ Pipeline Registers ================
     // IDLE -> LKP
     typedef struct packed {
+        logic valid;
         logic [NUM_NODES-1:0] worker;
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
@@ -91,6 +92,7 @@ module cxl_controller #(
     } idle_lkp_t;
     // LKP -> MOD
     typedef struct packed {
+        logic valid;
         logic [NUM_NODES-1:0] worker;
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
@@ -104,6 +106,7 @@ module cxl_controller #(
     } lkp_mod_t;
     // MOD -> REQ
     typedef struct packed {
+        logic valid;
         logic [NUM_NODES-1:0] worker;
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
@@ -136,6 +139,7 @@ module cxl_controller #(
         req_resp_d = req_resp_q;
 
         // IDLE -> LKP
+        idle_lkp_d.valid = (req_valid_i != '0);
         idle_lkp_d.worker = req_valid_i;
         idle_lkp_d.request_type = tx_signal_i;
         idle_lkp_d.load_addr = load_addr_i;
@@ -145,6 +149,7 @@ module cxl_controller #(
         idle_lkp_d.release_data = release_data_i;
 
         // LKP -> MOD
+        lkp_mod_d.valid = idle_lkp_q.valid;
         lkp_mod_d.worker = idle_lkp_q.worker;
         lkp_mod_d.request_type = idle_lkp_q.request_type;
         lkp_mod_d.load_addr = idle_lkp_q.load_addr;
@@ -157,12 +162,13 @@ module cxl_controller #(
         lkp_mod_d.cxl_release_mask = local_release_mask;
 
         // MOD -> REQ
+        mod_req_d.valid = lkp_mod_q.valid;
         mod_req_d.worker = lkp_mod_q.worker;
         mod_req_d.request_type = lkp_mod_q.request_type;
         mod_req_d.load_addr = lkp_mod_q.load_addr;
 
         // REQ -> RESP
-        req_resp_d.valid = mem_rvalid_i;
+        req_resp_d.valid = mem_rvalid_i && mod_req_q.valid;
         req_resp_d.worker = mod_req_q.worker;
         req_resp_d.request_type = mod_req_q.request_type;
         req_resp_d.resp_data = mem_rdata_i;
@@ -180,45 +186,45 @@ module cxl_controller #(
             cxl_table_in_progress_vec_d[k] = cxl_table_in_progress_vec_q[k];
             cxl_table_locked_d[k] = cxl_table_locked_q[k];
         end
+        if (lkp_mod_q.valid) begin
+            unique case (lkp_mod_q.request_type)
 
-        unique case (lkp_mod_q.request_type)
-
-            CMD_LOAD: begin
-                if (lkp_mod_q.cxl_upd_alloc) begin
-                    // New entry allocation
-                    cxl_table_valid_d[lkp_mod_q.cxl_upd_idx] = 1'b1;
-                    cxl_table_addr_d[lkp_mod_q.cxl_upd_idx] = lkp_mod_q.load_addr;
-                    cxl_table_checkout_vec_d[lkp_mod_q.cxl_upd_idx] = lkp_mod_q.worker;
-                    cxl_table_in_progress_vec_d[lkp_mod_q.cxl_upd_idx] = '0;
-                    cxl_table_locked_d[lkp_mod_q.cxl_upd_idx] = 1'b0;
-                end else begin
-                    // Existing entry: OR in this worker's checkout bit, clear its in_progress bit
-                    cxl_table_checkout_vec_d[lkp_mod_q.cxl_upd_idx] = cxl_table_checkout_vec_q[lkp_mod_q.cxl_upd_idx] | lkp_mod_q.worker;
-                    cxl_table_in_progress_vec_d[lkp_mod_q.cxl_upd_idx] = cxl_table_in_progress_vec_q[lkp_mod_q.cxl_upd_idx] & ~lkp_mod_q.worker;
+                CMD_LOAD: begin
+                    if (lkp_mod_q.cxl_upd_alloc) begin
+                        // New entry allocation
+                        cxl_table_valid_d[lkp_mod_q.cxl_upd_idx] = 1'b1;
+                        cxl_table_addr_d[lkp_mod_q.cxl_upd_idx] = lkp_mod_q.load_addr;
+                        cxl_table_checkout_vec_d[lkp_mod_q.cxl_upd_idx] = lkp_mod_q.worker;
+                        cxl_table_in_progress_vec_d[lkp_mod_q.cxl_upd_idx] = '0;
+                        cxl_table_locked_d[lkp_mod_q.cxl_upd_idx] = 1'b0;
+                    end else begin
+                        // Existing entry: OR in this worker's checkout bit, clear its in_progress bit
+                        cxl_table_checkout_vec_d[lkp_mod_q.cxl_upd_idx] = cxl_table_checkout_vec_q[lkp_mod_q.cxl_upd_idx] | lkp_mod_q.worker;
+                        cxl_table_in_progress_vec_d[lkp_mod_q.cxl_upd_idx] = cxl_table_in_progress_vec_q[lkp_mod_q.cxl_upd_idx] & ~lkp_mod_q.worker;
+                    end
                 end
-            end
 
-            CMD_TX_ABORT: begin
-                for (int j = 0; j < CXL_TABLE_DEPTH; j++) begin
-                    if (release_mask_local[j]) begin
-                        cxl_table_checkout_vec_d[j] = cxl_table_checkout_vec_q[j] & ~lkp_mod_q.worker;
-                        if ((cxl_table_checkout_vec_q[j] & ~lkp_mod_q.worker) == '0) begin
-                            cxl_table_valid_d[j] = 1'b0;
+                CMD_TX_ABORT: begin
+                    for (int j = 0; j < CXL_TABLE_DEPTH; j++) begin
+                        if (release_mask_local[j]) begin
+                            cxl_table_checkout_vec_d[j] = cxl_table_checkout_vec_q[j] & ~lkp_mod_q.worker;
+                            if ((cxl_table_checkout_vec_q[j] & ~lkp_mod_q.worker) == '0) begin
+                                cxl_table_valid_d[j] = 1'b0;
+                            end
                         end
                     end
                 end
-            end
 
-            CMD_TX_COMMIT: begin
-                
-            end
+                CMD_TX_COMMIT: begin
+                    
+                end
 
-            default: begin
-                
-            end
+                default: begin
+                    
+                end
 
-        endcase
-
+            endcase
+        end
     end
 
     // Combinational CAM CXL Table lookup
@@ -236,58 +242,60 @@ module cxl_controller #(
         local_cxl_upd_idx = '0;
         local_release_mask = '0;
 
-        unique case (idle_lkp_q.request_type)
-            CMD_LOAD: begin
-                // scan cxl table for hit
-                for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
-                    if (cxl_table_valid_q[i] && (cxl_table_addr_q[i] == idle_lkp_q.load_addr)) begin
-                        local_hit = 1'b1;
-                        local_hit_idx = i;
+        if (idle_lkp_q.valid) begin
+            unique case (idle_lkp_q.request_type)
+                CMD_LOAD: begin
+                    // scan cxl table for hit
+                    for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
+                        if (cxl_table_valid_q[i] && (cxl_table_addr_q[i] == idle_lkp_q.load_addr)) begin
+                            local_hit = 1'b1;
+                            local_hit_idx = i;
+                        end
+                    end
+                    // scan cxl table for free entries
+                    for (int i = CXL_TABLE_DEPTH-1; i >= 0; i--) begin
+                        if (!cxl_table_valid_q[i]) begin
+                            local_has_free = 1'b1;
+                            local_free_idx = i;
+                        end
+                    end
+                    
+                    // if address found in CXL Table
+                    if (local_hit) begin
+                        local_cxl_upd_alloc = 1'b0;
+                        local_cxl_upd_idx = local_hit_idx;
+                    // if not found, assign free entry and initiate load
+                    end else if (local_has_free) begin
+                        local_cxl_upd_alloc = 1'b1;
+                        local_cxl_upd_idx = local_free_idx;
+                    // stall if table full (for now)
+                    end else begin
+                        // abort?
                     end
                 end
-                // scan cxl table for free entries
-                for (int i = CXL_TABLE_DEPTH-1; i >= 0; i--) begin
-                    if (!cxl_table_valid_q[i]) begin
-                        local_has_free = 1'b1;
-                        local_free_idx = i;
-                    end
-                end
-                
-                // if address found in CXL Table
-                if (local_hit) begin
-                    local_cxl_upd_alloc = 1'b0;
-                    local_cxl_upd_idx = local_hit_idx;
-                // if not found, assign free entry and initiate load
-                end else if (local_has_free) begin
-                    local_cxl_upd_alloc = 1'b1;
-                    local_cxl_upd_idx = local_free_idx;
-                // stall if table full (for now)
-                end else begin
-                    // abort?
-                end
-            end
 
-            CMD_TX_ABORT : begin
-                local_release_mask = '0;
-                for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
-                    if (release_valid_local[i]) begin
-                        for (int j = 0; j < CXL_TABLE_DEPTH; j++) begin
-                            if (cxl_table_valid_q[j] && cxl_table_addr_q[j] == release_addr_local[i]) begin
-                                local_release_mask[j] = 1'b1;
+                CMD_TX_ABORT : begin
+                    local_release_mask = '0;
+                    for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
+                        if (release_valid_local[i]) begin
+                            for (int j = 0; j < CXL_TABLE_DEPTH; j++) begin
+                                if (cxl_table_valid_q[j] && cxl_table_addr_q[j] == release_addr_local[i]) begin
+                                    local_release_mask[j] = 1'b1;
+                                end
                             end
                         end
                     end
                 end
-            end
 
-            CMD_TX_COMMIT: begin
-                // Placeholder
-            end
+                CMD_TX_COMMIT: begin
+                    // Placeholder
+                end
 
-            default: begin
-                // Placeholder
-            end
-        endcase
+                default: begin
+                    // Placeholder
+                end
+            endcase
+        end 
     end
 
     // Send memory request response
@@ -301,7 +309,7 @@ module cxl_controller #(
         mem_wdata_o = '0;
         unique case (mod_req_q.request_type)
             CMD_LOAD: begin
-                mem_req_valid_o = '1;
+                mem_req_valid_o = mod_req_q.valid;
                 mem_we_o = '0;
                 mem_addr_o = mod_req_q.load_addr;
                 mem_wdata_o = '0;
@@ -353,7 +361,7 @@ module cxl_controller #(
     logic ctrl_ready_q;
     logic mem_pending;
     assign req_ready_o = {NUM_NODES{ctrl_ready_q}};
-    assign mem_pending = (mod_req_q.request_type == CMD_LOAD) && mem_req_valid_o;
+    assign mem_pending = mod_req_q.valid && (mod_req_q.request_type == CMD_LOAD);
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
             ctrl_ready_q <= 1'b1;
@@ -376,24 +384,27 @@ module cxl_controller #(
                 lkp_mod_q <= lkp_mod_d;
                 mod_req_q <= mod_req_d;
                 req_resp_q <= req_resp_d;
-                for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
-                    cxl_table_valid_q[k] <= cxl_table_valid_d[k];
-                    cxl_table_addr_q[k] <= cxl_table_addr_d[k];
-                    cxl_table_checkout_vec_q[k] <= cxl_table_checkout_vec_d[k];
-                    cxl_table_in_progress_vec_q[k] <= cxl_table_in_progress_vec_d[k];
-                    cxl_table_locked_q[k] <= cxl_table_locked_d[k];
+                if(lkp_mod_q.valid) begin
+                    for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
+                        cxl_table_valid_q[k] <= cxl_table_valid_d[k];
+                        cxl_table_addr_q[k] <= cxl_table_addr_d[k];
+                        cxl_table_checkout_vec_q[k] <= cxl_table_checkout_vec_d[k];
+                        cxl_table_in_progress_vec_q[k] <= cxl_table_in_progress_vec_d[k];
+                        cxl_table_locked_q[k] <= cxl_table_locked_d[k];
+                    end
                 end
                 
-                if (mem_rvalid_i && mod_req_q.request_type == CMD_LOAD) begin
-                    $display("[%0t] CXL Table[%0d] updated: valid=%b addr=%0d checkout=%b in_progress=%b locked=%b",
-                        $time, lkp_mod_q.cxl_upd_idx,
-                        cxl_table_valid_d[lkp_mod_q.cxl_upd_idx],
-                        cxl_table_addr_d[lkp_mod_q.cxl_upd_idx],
-                        cxl_table_checkout_vec_d[lkp_mod_q.cxl_upd_idx],
-                        cxl_table_in_progress_vec_d[lkp_mod_q.cxl_upd_idx],
-                        cxl_table_locked_d[lkp_mod_q.cxl_upd_idx]
-                    );
-                end
+                if (idle_lkp_d.valid != 0)
+                    $display("[%0t] CXL CONTROLLER [IDLE→LKP] node=%b cmd=%0d addr=%0d", $time, idle_lkp_d.worker, idle_lkp_d.request_type, idle_lkp_d.load_addr);
+
+                if (lkp_mod_d.valid != 0)
+                    $display("[%0t] CXL CONTROLLER [LKP→MOD]  node=%b alloc=%b idx=%0d", $time, lkp_mod_d.worker, lkp_mod_d.cxl_upd_alloc, lkp_mod_d.cxl_upd_idx);
+
+                if (mod_req_d.valid != 0)
+                    $display("[%0t] CXL CONTROLLER [MOD→REQ]  node=%b addr=%0d", $time, mod_req_d.worker, mod_req_d.load_addr);
+
+                if (req_resp_d.valid && req_resp_d.worker != 0)
+                    $display("[%0t] CXL CONTROLLER [REQ→RESP] node=%b data=%h", $time, req_resp_d.worker, req_resp_d.resp_data);
             end
         end
     end

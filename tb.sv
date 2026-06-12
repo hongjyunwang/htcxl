@@ -124,14 +124,15 @@ module tb_cxl_controller;
         //     end
         // join_none
 
-        issue_request(CMD_LOAD, 4'b0001, 64'd5);
-
         // Preload memory at address 5
         top_inst.mem.mem[5] = 64'hDEAD_BEEF_0000_0001;
         $display("[%0t] TB: preloaded mem[5] = %h", $time, top_inst.mem.mem[5]);
 
-        // Issue LOAD: node 1 (one-hot 0001), address 5
+        // Issue LOAD: node 1 (0001), address 5
         issue_request(CMD_LOAD, 4'b0001, 64'd5);
+
+        // Issue LOAD: node 2 (0010), address 5
+        issue_request(CMD_LOAD, 4'b0010, 64'd5);
 
         // repeat(5) begin
         // @(posedge clk);
