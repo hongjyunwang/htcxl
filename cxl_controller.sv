@@ -300,6 +300,7 @@ module cxl_controller #(
 
     // ================ REQ Stage ================
     // Send memory request response
+    logic mem_req_sent_q;
     always_comb begin
         // defaults
         mem_req_valid_o = '0;
@@ -308,7 +309,7 @@ module cxl_controller #(
         mem_wdata_o = '0;
         unique case (mod_req_q.request_type)
             CMD_LOAD: begin
-                mem_req_valid_o = mod_req_q.valid;
+                mem_req_valid_o = mod_req_q.valid && !mem_req_sent_q;
                 mem_we_o = '0;
                 mem_addr_o = mod_req_q.load_addr;
                 mem_wdata_o = '0;
@@ -363,6 +364,7 @@ module cxl_controller #(
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
             ctrl_ready_q <= 1'b1;
+            mem_req_sent_q <= 1'b0;
             idle_lkp_q <= '0;
             lkp_mod_q <= '0;
             mod_req_q <= '0;
@@ -378,6 +380,7 @@ module cxl_controller #(
             ctrl_ready_q <= mem_rvalid_i || !mod_req_q.valid;
             if (mem_rvalid_i || !mod_req_q.valid) begin
                 // pipeline is free to advance
+                mem_req_sent_q <= 1'b0;
                 idle_lkp_q <= idle_lkp_d;
                 lkp_mod_q <= lkp_mod_d;
                 mod_req_q <= mod_req_d;
@@ -391,21 +394,69 @@ module cxl_controller #(
                         cxl_table_locked_q[k] <= cxl_table_locked_d[k];
                     end
                 end
-                
-                if (idle_lkp_d.valid != 0)
-                    $display("[%0t] CXL CONTROLLER [IDLE→LKP] node=%b cmd=%0d addr=%0d", $time, idle_lkp_d.worker, idle_lkp_d.request_type, idle_lkp_d.load_addr);
-
-                if (lkp_mod_d.valid != 0)
-                    $display("[%0t] CXL CONTROLLER [LKP→MOD]  node=%b alloc=%b idx=%0d", $time, lkp_mod_d.worker, lkp_mod_d.cxl_upd_alloc, lkp_mod_d.cxl_upd_idx);
-
-                if (mod_req_d.valid != 0)
-                    $display("[%0t] CXL CONTROLLER [MOD→REQ]  node=%b addr=%0d", $time, mod_req_d.worker, mod_req_d.load_addr);
-
-                if (req_resp_d.valid && req_resp_d.worker != 0)
-                    $display("[%0t] CXL CONTROLLER [REQ→RESP] node=%b data=%h", $time, req_resp_d.worker, req_resp_d.resp_data);
+            end else begin
+                // stalled, mod_req_q holds its value; mark that we've now sent
+                // the request for it (so we don't re-assert mem_req_valid_o)
+                mem_req_sent_q <= 1'b1;
             end
         end
     end
+
+    // Debug: CXL Controller State
+    always @(negedge clk_i) begin
+        if (!rst_i) begin
+            if (idle_lkp_q.valid)
+                $display("[%0t] CXL CONTROLLER [IDLE→LKP] node=%b cmd=%0d addr=%0d", $time, idle_lkp_q.worker, idle_lkp_q.request_type, idle_lkp_q.load_addr);
+
+            if (lkp_mod_q.valid)
+                $display("[%0t] CXL CONTROLLER [LKP→MOD]  node=%b alloc=%b idx=%0d", $time, lkp_mod_q.worker, lkp_mod_q.cxl_upd_alloc, lkp_mod_q.cxl_upd_idx);
+
+            if (mod_req_q.valid)
+                $display("[%0t] CXL CONTROLLER [MOD→REQ]  node=%b addr=%0d", $time, mod_req_q.worker, mod_req_q.load_addr);
+
+            if (req_resp_q.valid && req_resp_q.worker != 0)
+                $display("[%0t] CXL CONTROLLER [REQ→RESP] node=%b data=%h", $time, req_resp_q.worker, req_resp_q.resp_data);
+        end
+    end
+
+    // always @(negedge clk_i) begin
+    //     if (!rst_i) begin
+    //         $display("[%0t] DEBUG: idle_lkp_q.valid=%b local_hit=%b local_has_free=%b gate=%b mem_rvalid_i=%b mod_req_q.valid=%b",
+    //             $time,
+    //             idle_lkp_q.valid,
+    //             local_hit,
+    //             local_has_free,
+    //             (mem_rvalid_i || !mod_req_q.valid),
+    //             mem_rvalid_i,
+    //             mod_req_q.valid);
+
+    //         $display("[%0t] CXL TABLE STATE:", $time);
+    //         for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
+    //             if (cxl_table_valid_q[i]) begin
+    //                 $display("  entry[%0d]: addr=%0d checkout=%b in_progress=%b locked=%b",
+    //                     i,
+    //                     cxl_table_addr_q[i],
+    //                     cxl_table_checkout_vec_q[i],
+    //                     cxl_table_in_progress_vec_q[i],
+    //                     cxl_table_locked_q[i]);
+    //             end
+    //         end
+    //     end
+    // end
+
+    // always @(negedge clk_i) begin
+    //     if (!rst_i) begin
+    //         $display("[%0t] DEBUG: gate=%b | mem_rvalid_i=%b mem_rdata_i=%h | mod_req_q.valid=%b mod_req_q.worker=%b mod_req_q.addr=%0d | ctrl_ready_q=%b",
+    //             $time,
+    //             (mem_rvalid_i || !mod_req_q.valid),
+    //             mem_rvalid_i,
+    //             mem_rdata_i,
+    //             mod_req_q.valid,
+    //             mod_req_q.worker,
+    //             mod_req_q.load_addr,
+    //             ctrl_ready_q);
+    //     end
+    // end
 
 endmodule
 
