@@ -77,12 +77,11 @@ module tb_cxl_controller;
         req_valid = node;
         tx_signal = cmd;
         load_addr = addr;
+        $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
 
         @(posedge clk);
         @(negedge clk);
         req_valid = '0;
-
-        $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
 
         while (!(resp_valid & node)) @(negedge clk);  // check own bit, not whole vector
 
