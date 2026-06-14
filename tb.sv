@@ -30,6 +30,7 @@ module tb_cxl_controller;
     logic [1:0] comp_signal;
     logic [DATA_W-1:0] load_data;
 
+    // DUT
     top #(
         .DATA_W(DATA_W), 
         .ADDR_W(ADDR_W), 
@@ -48,23 +49,21 @@ module tb_cxl_controller;
         .release_is_write_i(release_is_write),
         .release_addr_i(release_addr), 
         .release_data_i(release_data),
-
         .req_ready_o(req_ready),
         .resp_valid_o(resp_valid),
         .comp_signal_o(comp_signal), 
         .load_data_o(load_data)
     );
 
-    // 10ns clock
-    initial clk = 1'b0;
-    always #5 clk = ~clk;
-
-    // Watchdog so a stalled FSM doesn't hang the sim forever
+    // Clock generation and watchdog
     initial begin
+        clk = 1'b0;
+        $display("[0] TB: Clock Instantiated");
         #2000;
-        $display("[%0t] *** TIMEOUT — FSM likely stalled ***", $time);
+        $display("[%0t] TB: TIMEOUT", $time);
         $finish;
     end
+    always #5 clk = ~clk; // 10ns clock period
 
     // Drive a cxl request (LOAD, Tx_Commit, or Tx_Abort) and complete the valid/ready handshake
     task automatic issue_request(
@@ -72,32 +71,33 @@ module tb_cxl_controller;
         input logic [NUM_NODES-1:0] node,
         input logic [ADDR_W-1:0] addr
     );
-        // Wait until controller is ready
         @(negedge clk);
-        while (!req_ready) @(negedge clk);
+        while (!(req_ready & node)) @(negedge clk);  // also check own bit on req_ready
 
-        // Drive inputs
         req_valid = node;
         tx_signal = cmd;
         load_addr = addr;
 
-        // Hold for one cycle then deassert
         @(posedge clk);
         @(negedge clk);
         req_valid = '0;
 
         $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
 
-        // Wait for response
-        while (!resp_valid) @(negedge clk);
+        while (!(resp_valid & node)) @(negedge clk);  // check own bit, not whole vector
 
         $display("[%0t] TB: response received (node=%b comp=%0d data=%0h)", $time, node, comp_signal, load_data);
     endtask
 
     initial begin
         // Init all inputs
-        req_valid = '0; tx_signal = 0; load_addr = 0;
-        release_valid = 0; release_is_write = 0; release_addr = 0; release_data = 0;
+        req_valid = '0; 
+        tx_signal = 0; 
+        load_addr = 0;
+        release_valid = 0; 
+        release_is_write = 0; 
+        release_addr = 0; 
+        release_data = 0;
 
         // Reset
         rst = 1'b1;
@@ -105,66 +105,23 @@ module tb_cxl_controller;
         rst = 1'b0;
         @(posedge clk);
 
-        // // Debug trace
-        // fork
-        //     begin
-        //         repeat(50) begin
-        //             @(posedge clk);
-        //             $display("[%0t] ready=%b req_valid=%b mem_req_valid=%b mem_rvalid=%b resp_valid=%b comp=%b ctrl_ready=%b",
-        //                 $time,
-        //                 req_ready,
-        //                 req_valid,
-        //                 top_inst.mem_req_valid,
-        //                 top_inst.mem_rvalid,
-        //                 resp_valid,
-        //                 comp_signal,
-        //                 top_inst.dut.ctrl_ready_q
-        //             );
-        //         end
-        //     end
-        // join_none
-
         // Preload memory at address 5
         top_inst.mem.mem[5] = 64'hDEAD_BEEF_0000_0001;
         $display("[%0t] TB: preloaded mem[5] = %h", $time, top_inst.mem.mem[5]);
 
-        // Issue LOAD: node 1 (0001), address 5
-        issue_request(CMD_LOAD, 4'b0001, 64'd5);
-
-        // Issue LOAD: node 2 (0010), address 5
-        issue_request(CMD_LOAD, 4'b0010, 64'd5);
-
-        // repeat(5) begin
-        // @(posedge clk);
-        // $display("[%0t] state=%0d load_addr=%0d mem_req_valid=%b any_mem_wait=%b mem_rvalid=%b",
-        //     $time,
-        //     top_inst.dut.worker_state[0],
-        //     top_inst.dut.worker_load_addr[0],
-        //     top_inst.mem_req_valid,
-        //     top_inst.dut.any_mem_wait,
-        //     top_inst.mem_rvalid);
-        // end
+        fork
+            issue_request(CMD_LOAD, 4'b0001, 64'd5); // node 1, cycle N
+            begin
+                @(negedge clk); // wait one cycle behind node 1
+                issue_request(CMD_LOAD, 4'b0010, 64'd5); // node 2, cycle N+1
+            end
+        join
 
         // Let it run so the state trace prints
         repeat (12) @(posedge clk);
 
-        // Check the part that currently works: CXL table entry 0
-        // (empty table -> free_idx priority encoder picks index 0)
-        // $display("[%0t] TB: checking CXL table entry 0...", $time);
-        // if (top_inst.dut.cxl_table[0].valid === 1'b1   &&
-        //     top_inst.dut.cxl_table[0].addr === 64'd5  &&
-        //     top_inst.dut.cxl_table[0].checkout_vec === 4'b0001) begin
-        //     $display("[%0t] TB: PASS — entry 0 valid, addr=5, checkout=0001", $time);
-        // end else begin
-        //     $display("[%0t] TB: FAIL — entry 0: valid=%b addr=%0d checkout=%b",
-        //              $time,
-        //              top_inst.dut.cxl_table[0].valid,
-        //              top_inst.dut.cxl_table[0].addr,
-        //              top_inst.dut.cxl_table[0].checkout_vec);
-        // end
-
-        // $display("[%0t] TB: done", $time);
-        // $finish;
+        $display("[%0t] TB: done", $time);
+        $finish;
     end
 
     // Waveforms
