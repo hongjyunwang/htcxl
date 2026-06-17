@@ -139,7 +139,7 @@ module cxl_controller #(
     wire [RELEASE_SET_DEPTH-1:0] local_release_valid;
     assign local_release_valid = idle_mod_q.release_valid;
     wire [RELEASE_SET_DEPTH-1:0] local_release_addr;
-    assign local_release_addr = idle_mod_q.release_valid;
+    assign local_release_addr = idle_mod_q.release_addr;
     always_comb begin
         // Default: hold current values
         for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
@@ -153,26 +153,30 @@ module cxl_controller #(
         if (idle_mod_q.valid) begin
             unique case (idle_mod_q.request_type)
                 CMD_LOAD: begin
+                    logic hit_found;
+                    hit_found = 1'b0;
+
                     // scan cxl table for hit
                     for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
                         if (cxl_table_valid_q[i] && (cxl_table_addr_q[i] == idle_mod_q.load_addr)) begin
                             // Existing entry: OR in this worker's checkout bit, clear its in_progress bit
                             cxl_table_checkout_vec_d[i] = cxl_table_checkout_vec_q[i] | idle_mod_q.worker;
                             cxl_table_in_progress_vec_d[i] = cxl_table_in_progress_vec_q[i] & ~idle_mod_q.worker;
+                            hit_found = 1'b1;
                         end
                     end
                     // logically no hit, so scan cxl table for first free entry
                     for (int i = CXL_TABLE_DEPTH-1; i >= 0; i--) begin
                         logic alloc_done;
                         alloc_done = 1'b0;
-                        if (!alloc_done && !cxl_table_valid_q[i]) begin
+                        if (!hit_found && !alloc_done && !cxl_table_valid_q[i]) begin
                             // New entry allocation
                             cxl_table_valid_d[i] = 1'b1;
                             cxl_table_addr_d[i] = idle_mod_q.load_addr;
                             cxl_table_checkout_vec_d[i] = idle_mod_q.worker;
                             cxl_table_in_progress_vec_d[i] = '0;
                             cxl_table_locked_d[i] = 1'b0;
-                            alloc_done = 1'b1;;
+                            alloc_done = 1'b1;
                         end
                     end
                     // Need CXL Table full detection
@@ -207,6 +211,7 @@ module cxl_controller #(
 
     // ================ REQ Stage ================
     // Send memory request response
+    logic req_stall; // global stall signal
     logic mem_req_sent_q;
     always_comb begin
         // defaults
@@ -220,10 +225,13 @@ module cxl_controller #(
                 mem_we_o = '0;
                 mem_addr_o = mod_req_q.load_addr;
                 mem_wdata_o = '0;
+                // stall if the current instruction isn't a NOP and memory isn't ready yet
+                req_stall = mod_req_q.valid && !mem_rvalid_i;
             end
 
             CMD_TX_ABORT : begin
                 // No action
+                req_stall = 1'b0; // no stall
             end
 
             CMD_TX_COMMIT: begin
@@ -284,7 +292,7 @@ module cxl_controller #(
             end
         end else begin
             ctrl_ready_q <= mem_rvalid_i || !mod_req_q.valid;
-            if (mem_rvalid_i || !mod_req_q.valid) begin
+            if (!req_stall) begin
                 // pipeline is free to advance
                 mem_req_sent_q <= 1'b0;
                 idle_mod_q <= idle_mod_d;
