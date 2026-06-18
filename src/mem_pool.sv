@@ -44,7 +44,7 @@ module mem_pool_stub #(
 
             // Stage 0: capture a fresh read
             rd_pending[0] <= (mem_req_valid_i && !mem_we_i);
-            rd_data[0] <= mem[widx(mem_addr_i)];
+            rd_data[0] <= (mem_req_valid_i && !mem_we_i) ? mem[widx(mem_addr_i)] : rd_data[0];
 
             // Shift the pipeline toward the output
             for (int i = 1; i < MEM_LATENCY; i++) begin
