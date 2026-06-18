@@ -6,7 +6,7 @@ module tb_wr_buf;
     localparam int DATA_W = 64;
     localparam int ADDR_W = 64;
     localparam int DEPTH = 16;
-    localparam int MEM_LATENCY = 2; // >1 to stress the in-flight gate
+    localparam int MEM_LATENCY = 3; // >1 to stress the in-flight gate
     localparam int CLK_PERIOD = 10;
 
     logic clk;
@@ -92,7 +92,7 @@ module tb_wr_buf;
         .mem_addr_i(pop_addr),
         .mem_wdata_i(pop_wdata),
         .mem_rdata_o(mem_rdata),
-        .mem_rvalid_o(mem_ready) // stub ready → dut mem_ready_i
+        .mem_rvalid_o(mem_ready)
     );
 
     // ================ Tasks ================
@@ -193,6 +193,7 @@ module tb_wr_buf;
         test_num = 1;
         $display("\n=== TEST %0d: Basic push, wait for memory response ===", test_num);
 
+        // Node 0001, LOAD request, address 64'hA0
         push_entry(.we(1'b0), .addr(64'hA0), .wdata('0),
                    .worker(4'b0001), .req_type(2'b00));
 
@@ -202,15 +203,16 @@ module tb_wr_buf;
             else $fatal(1, "T%0d: wrong resp_worker. got=%0b exp=0001", test_num, got_worker);
         $display("T%0d PASS: resp_worker correct (%0b)", test_num, got_worker);
 
-        // Verify resp_valid deasserted the next cycle (the step in wait_resp covers this)
+        // Verify resp_valid deasserted the next cycle
         assert (!resp_valid)
             else $fatal(1, "T%0d: resp_valid still high after pulse cycle", test_num);
         $display("T%0d PASS: resp_valid deasserted correctly", test_num);
 
+        // reset after every test
         do_reset();
 
         // ============================================================
-        // TEST 2: Back-to-back pushes — verify in-flight gate
+        // TEST 2: Back-to-back pushes to verify in-flight gate
         //   Push two entries. The second pop must NOT fire until
         //   mem_ready_i returns for the first.
         // ============================================================
@@ -218,8 +220,11 @@ module tb_wr_buf;
         $display("\n=== TEST %0d: In-flight gate — two sequential pops ===", test_num);
 
         // Push both before either is consumed (FIFO has room)
+        // Node 0010, LOAD request, address 64'hB0
         push_entry(.we(1'b0), .addr(64'hB0), .wdata('0),
                    .worker(4'b0010), .req_type(2'b00));
+
+        // Node 0100, LOAD request, address 64'hC0
         push_entry(.we(1'b0), .addr(64'hC0), .wdata('0),
                    .worker(4'b0100), .req_type(2'b00));
 
@@ -235,6 +240,10 @@ module tb_wr_buf;
             else $fatal(1, "T%0d: 2nd resp wrong. got=%0b exp=0100", test_num, got_worker);
         $display("T%0d PASS: 2nd resp_worker=0100", test_num);
 
+        assert (!resp_valid)
+            else $fatal(1, "T%0d: resp_valid still high after pulse cycle", test_num);
+        $display("T%0d PASS: resp_valid deasserted correctly", test_num);
+
         do_reset();
 
         // ============================================================
@@ -243,48 +252,54 @@ module tb_wr_buf;
         test_num = 3;
         $display("\n=== TEST %0d: Fill FIFO to DEPTH=%0d ===", test_num, DEPTH);
 
-        // Push DEPTH entries without waiting for memory responses.
-        // Since MEM_LATENCY > 0, the memory will start consuming from the
-        // front; we're racing it. To cleanly test "full", we need to push
-        // faster than memory drains. With LATENCY=2 and DEPTH=16, pushing
-        // 16 times back-to-back will hit full before all drain.
-        // We just assert push_ready deasserts at some point.
         begin
+            // Force req_in_flight high so no pops occur while filling
+            force dut.req_in_flight = 1;
+
             pushed = 0;
-            full_seen = 0;
+            push_we = 0;
+            push_wdata = '0;
+            push_req_type = 2'b00;
+
             while (pushed < DEPTH) begin
                 if (push_ready) begin
-                    push_valid    = 1;
-                    push_we       = 0;
-                    push_addr     = 64'(pushed * 8);
-                    push_wdata    = '0;
-                    push_worker   = NUM_NODES'(pushed % NUM_NODES);
-                    push_req_type = 2'b00;
+                    push_valid = 1;
+                    push_addr = 64'(pushed * 8);
+                    push_worker = NUM_NODES'(pushed % NUM_NODES);
                     pushed++;
                 end else begin
                     push_valid = 0;
-                    full_seen  = 1;
                 end
                 @(posedge clk); #1;
             end
             push_valid = 0;
 
-            // Confirm full was seen OR FIFO was drained faster than we pushed
-            // (with LATENCY=2 that won't happen for 16 entries)
-            if (full_seen)
-                $display("T%0d PASS: push_ready deasserted (FIFO full observed)", test_num);
-            else
-                $display("T%0d INFO: memory drained faster than fill — increase DEPTH or LATENCY to observe full", test_num);
+            // Let last push settle
+            @(posedge clk); #1;
+
+            assert (dut.count == DEPTH)
+                else $fatal(1, "T%0d: count=%0d expected %0d", test_num, dut.count, DEPTH);
+            assert (!push_ready)
+                else $fatal(1, "T%0d: push_ready still high — FIFO not full", test_num);
+            $display("T%0d PASS: FIFO filled to DEPTH=%0d, push_ready deasserted", test_num, DEPTH);
+
+            release dut.req_in_flight;
+            force dut.req_in_flight = 0;
+            @(posedge clk); #1;  // one pop fires here, req_in_flight FF sets to 1
+            release dut.req_in_flight;
+            // From here the FF drives naturally: it will self-clear when mem_ready_i returns
         end
 
-        // Drain: wait for all responses
+        // Drain: track from current resp_count baseline so we wait for exactly DEPTH responses
         begin
-            target = DEPTH;
-            $display("T%0d: waiting for all %0d responses...", test_num, target);
-            while (resp_count < target) begin
+            int drain_start;
+            drain_start = resp_count;
+            target = DEPTH - 1; // one entry already popped during the force-0 pulse
+            $display("T%0d: waiting for %0d responses (1 already in flight)...", test_num, target);
+            while ((resp_count - drain_start) < target) begin
                 @(posedge clk); #1;
             end
-            $display("T%0d PASS: all %0d responses received", test_num, target);
+            $display("T%0d PASS: all %0d responses received", test_num, DEPTH);
         end
 
         do_reset();
@@ -299,6 +314,7 @@ module tb_wr_buf;
         test_num = 4;
         $display("\n=== TEST %0d: Push while request in flight ===", test_num);
 
+        // Node 1000
         push_entry(.we(1'b0), .addr(64'hD0), .wdata('0),
                    .worker(4'b1000), .req_type(2'b00));
 
@@ -306,6 +322,7 @@ module tb_wr_buf;
         @(posedge clk); #1;
 
         // Now push a second entry while first is in flight
+        // Node 0001
         push_entry(.we(1'b0), .addr(64'hE0), .wdata('0),
                    .worker(4'b0001), .req_type(2'b00));
 
@@ -325,8 +342,7 @@ module tb_wr_buf;
         do_reset();
 
         // ============================================================
-        // TEST 5: Write (we=1) entry — verify write path doesn't
-        //         corrupt the worker tag
+        // TEST 5: Write (we=1) entry, verify write path doesn't corrupt the worker tag
         // ============================================================
         test_num = 5;
         $display("\n=== TEST %0d: Write request — no hang, FIFO drains ===", test_num);
@@ -354,8 +370,8 @@ module tb_wr_buf;
         begin
             expected_a = 64'hCAFEBABE_DEADBEEF;
             expected_b = 64'h0123456789ABCDEF;
-            addr_a     = 64'h100;
-            addr_b     = 64'h200;
+            addr_a = 64'h100;
+            addr_b = 64'h200;
 
             // Preload the stub's backing store directly
             // widx(addr) = addr % MEM_DEPTH = 0x100 % 1024 = 256, 0x200 % 1024 = 512
