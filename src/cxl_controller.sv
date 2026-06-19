@@ -22,21 +22,24 @@ module cxl_controller #(
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i, // release set address
     input logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_i, // release set data
 
-    // Inputs from CXL memory pool
-    input logic mem_rvalid_i,
-    input logic [DATA_W-1:0] mem_rdata_i,
+    // Inputs from CXL memory pool (buffer)
+    input logic buffer_full_i,
+    // input logic mem_rvalid_i,
+    // input logic [DATA_W-1:0] mem_rdata_i,
 
     // Outputs to hosts/nodes
     output logic [NUM_NODES-1:0] req_ready_o, // tell the host that CXL controller is ready to accept a new request from specifc nodes
-    output logic [NUM_NODES-1:0] resp_valid_o, // handshake to signal completed request
-    output logic [1:0] comp_signal_o,
-    output logic [DATA_W-1:0] load_data_o,
+    output logic [NUM_NODES-1:0] resp_valid_o, // handshake to signal completed request (only Tx_abort uses this)
+    output logic [1:0] comp_signal_o, // type of request completed (only Tx_abort uses this)
+    // output logic [DATA_W-1:0] load_data_o,
 
-    // Outputs to CXL memory pool
+    // Outputs to CXL memory pool (buffer)
     output logic mem_req_valid_o,
     output logic mem_we_o,
     output logic [ADDR_W-1:0] mem_addr_o,
-    output logic [DATA_W-1:0] mem_wdata_o
+    output logic [DATA_W-1:0] mem_wdata_o,
+    output logic [NUM_NODES-1:0] mem_worker_o,
+    output logic [1:0] mem_req_type_o
 );
     localparam int NUM_WORKERS = NUM_NODES;
     localparam int CXL_IDX_W = $clog2(CXL_TABLE_DEPTH);
@@ -93,23 +96,23 @@ module cxl_controller #(
         logic [ADDR_W-1:0] load_addr;
     } mod_req_t;
     // REQ -> RESP
-    typedef struct packed {
-        logic valid;
-        logic [NUM_NODES-1:0] worker;
-        logic [1:0] request_type;
-        logic [DATA_W-1:0] resp_data;
-    } req_resp_t;
+    // typedef struct packed {
+    //     logic valid;
+    //     logic [NUM_NODES-1:0] worker;
+    //     logic [1:0] request_type;
+    //     logic [DATA_W-1:0] resp_data;
+    // } req_resp_t;
     // q is present, d is next state
     idle_mod_t idle_mod_q, idle_mod_d;
     mod_req_t mod_req_q, mod_req_d;
-    req_resp_t req_resp_q, req_resp_d;
+    // req_resp_t req_resp_q, req_resp_d;
 
     // Set next register state
     always_comb begin
         // Default
         idle_mod_d = idle_mod_q;
         mod_req_d = mod_req_q;
-        req_resp_d = req_resp_q;
+        // req_resp_d = req_resp_q;
 
         // IDLE -> MOD
         idle_mod_d.valid = (req_valid_i != '0);
@@ -128,10 +131,10 @@ module cxl_controller #(
         mod_req_d.load_addr = idle_mod_q.load_addr;
 
         // REQ -> RESP
-        req_resp_d.valid = mem_rvalid_i && mod_req_q.valid;
-        req_resp_d.worker = mod_req_q.worker;
-        req_resp_d.request_type = mod_req_q.request_type;
-        req_resp_d.resp_data = mem_rdata_i;
+        // req_resp_d.valid = mem_rvalid_i && mod_req_q.valid;
+        // req_resp_d.worker = mod_req_q.worker;
+        // req_resp_d.request_type = mod_req_q.request_type;
+        // req_resp_d.resp_data = mem_rdata_i;
     end
 
     // ================ MOD Stage ================
@@ -210,28 +213,35 @@ module cxl_controller #(
     end
 
     // ================ REQ Stage ================
-    // Send memory request response
-    logic req_stall; // global stall signal
-    logic mem_req_sent_q;
+    // Push memory request into wr_buf — fire and forget, no waiting on completion
+    logic req_stall; // global stall signal, now purely buffer-driven
     always_comb begin
         // defaults
         mem_req_valid_o = '0;
         mem_we_o = '0;
         mem_addr_o = '0;
         mem_wdata_o = '0;
+        mem_worker_o = '0;
+        mem_req_type_o = '0;
+        resp_valid_o = '0;
+        comp_signal_o = '0;
+
         unique case (mod_req_q.request_type)
             CMD_LOAD: begin
-                mem_req_valid_o = mod_req_q.valid && !mem_req_sent_q;
+                mem_req_valid_o = mod_req_q.valid;
                 mem_we_o = '0;
                 mem_addr_o = mod_req_q.load_addr;
                 mem_wdata_o = '0;
-                // stall if the current instruction isn't a NOP and memory isn't ready yet
-                req_stall = mod_req_q.valid && !mem_rvalid_i;
+                mem_worker_o = mod_req_q.worker;
+                mem_req_type_o = mod_req_q.request_type;
+                // LOAD completion no longer goes through this pipeline
+                // wr_buf signals resp_valid_o/resp_worker_o/resp_rdata_o directly to nodes
             end
 
             CMD_TX_ABORT : begin
-                // No action
-                req_stall = 1'b0; // no stall
+                // Completes within the controller itself (no memory request)
+                resp_valid_o = mod_req_q.valid ? mod_req_q.worker : '0;
+                comp_signal_o = mod_req_q.request_type;
             end
 
             CMD_TX_COMMIT: begin
@@ -242,36 +252,39 @@ module cxl_controller #(
                 // Placeholder
             end
         endcase
+
+        // Stall purely on the buffer being full
+        req_stall = mod_req_q.valid && (mod_req_q.request_type == CMD_LOAD) && buffer_full_i;
     end
 
-    // ================ RESP Stage ================
-    // Drive node response ports 
-    always_comb begin
-        // default
-        resp_valid_o = '0;
-        comp_signal_o = '0;
-        load_data_o = '0;
-        unique case (req_resp_q.request_type)
-            CMD_LOAD: begin
-                resp_valid_o = req_resp_q.valid ? req_resp_q.worker : '0;
-                comp_signal_o = req_resp_q.request_type;
-                load_data_o = req_resp_q.resp_data;
-            end
+    // // ================ RESP Stage ================
+    // // Drive node response ports 
+    // always_comb begin
+    //     // default
+    //     resp_valid_o = '0;
+    //     comp_signal_o = '0;
+    //     load_data_o = '0;
+    //     unique case (req_resp_q.request_type)
+    //         CMD_LOAD: begin
+    //             resp_valid_o = req_resp_q.valid ? req_resp_q.worker : '0;
+    //             comp_signal_o = req_resp_q.request_type;
+    //             load_data_o = req_resp_q.resp_data;
+    //         end
 
-            CMD_TX_ABORT : begin
-                resp_valid_o = req_resp_q.valid ? req_resp_q.worker : '0;
-                comp_signal_o = req_resp_q.request_type;
-            end
+    //         CMD_TX_ABORT : begin
+    //             resp_valid_o = req_resp_q.valid ? req_resp_q.worker : '0;
+    //             comp_signal_o = req_resp_q.request_type;
+    //         end
 
-            CMD_TX_COMMIT: begin
-                // Placeholder
-            end
+    //         CMD_TX_COMMIT: begin
+    //             // Placeholder
+    //         end
 
-            default: begin
-                // Placeholder
-            end
-        endcase
-    end
+    //         default: begin
+    //             // Placeholder
+    //         end
+    //     endcase
+    // end
 
     // Sequential logic
     logic ctrl_ready_q;
@@ -279,10 +292,8 @@ module cxl_controller #(
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
             ctrl_ready_q <= 1'b1;
-            mem_req_sent_q <= 1'b0;
             idle_mod_q <= '0;
             mod_req_q <= '0;
-            req_resp_q <= '0;
             for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
                 cxl_table_valid_q[k] <= 1'b0;
                 cxl_table_addr_q[k] <= '0;
@@ -291,13 +302,11 @@ module cxl_controller #(
                 cxl_table_locked_q[k] <= 1'b0;
             end
         end else begin
-            ctrl_ready_q <= mem_rvalid_i || !mod_req_q.valid;
+            ctrl_ready_q <= !req_stall;
             if (!req_stall) begin
                 // pipeline is free to advance
-                mem_req_sent_q <= 1'b0;
                 idle_mod_q <= idle_mod_d;
                 mod_req_q <= mod_req_d;
-                req_resp_q <= req_resp_d;
                 for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
                     cxl_table_valid_q[k] <= cxl_table_valid_d[k];
                     cxl_table_addr_q[k] <= cxl_table_addr_d[k];
@@ -305,11 +314,10 @@ module cxl_controller #(
                     cxl_table_in_progress_vec_q[k] <= cxl_table_in_progress_vec_d[k];
                     cxl_table_locked_q[k] <= cxl_table_locked_d[k];
                 end
-            end else begin
-                // stalled, mod_req_q holds its value; mark that we've now sent
-                // the request for it (so we don't re-assert mem_req_valid_o)
-                mem_req_sent_q <= 1'b1;
             end
+            // when stalled, mod_req_q simply holds — wr_buf will re-sample
+            // mem_req_valid_o every cycle until buffer_full_i drops, since
+            // mem_req_valid_o is purely combinational on mod_req_q now
         end
     end
 
@@ -322,49 +330,10 @@ module cxl_controller #(
             if (mod_req_q.valid)
                 $display("[%0t] CXL CONTROLLER [MOD→REQ]  node=%b addr=%0d", $time, mod_req_q.worker, mod_req_q.load_addr);
 
-            if (req_resp_q.valid && req_resp_q.worker != 0)
-                $display("[%0t] CXL CONTROLLER [REQ→RESP] node=%b data=%h", $time, req_resp_q.worker, req_resp_q.resp_data);
+            // if (req_resp_q.valid && req_resp_q.worker != 0)
+            //     $display("[%0t] CXL CONTROLLER [REQ→RESP] node=%b data=%h", $time, req_resp_q.worker, req_resp_q.resp_data);
         end
     end
-
-    // always @(negedge clk_i) begin
-    //     if (!rst_i) begin
-    //         $display("[%0t] DEBUG: idle_lkp_q.valid=%b local_hit=%b local_has_free=%b gate=%b mem_rvalid_i=%b mod_req_q.valid=%b",
-    //             $time,
-    //             idle_lkp_q.valid,
-    //             local_hit,
-    //             local_has_free,
-    //             (mem_rvalid_i || !mod_req_q.valid),
-    //             mem_rvalid_i,
-    //             mod_req_q.valid);
-
-    //         $display("[%0t] CXL TABLE STATE:", $time);
-    //         for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
-    //             if (cxl_table_valid_q[i]) begin
-    //                 $display("  entry[%0d]: addr=%0d checkout=%b in_progress=%b locked=%b",
-    //                     i,
-    //                     cxl_table_addr_q[i],
-    //                     cxl_table_checkout_vec_q[i],
-    //                     cxl_table_in_progress_vec_q[i],
-    //                     cxl_table_locked_q[i]);
-    //             end
-    //         end
-    //     end
-    // end
-
-    // always @(negedge clk_i) begin
-    //     if (!rst_i) begin
-    //         $display("[%0t] DEBUG: gate=%b | mem_rvalid_i=%b mem_rdata_i=%h | mod_req_q.valid=%b mod_req_q.worker=%b mod_req_q.addr=%0d | ctrl_ready_q=%b",
-    //             $time,
-    //             (mem_rvalid_i || !mod_req_q.valid),
-    //             mem_rvalid_i,
-    //             mem_rdata_i,
-    //             mod_req_q.valid,
-    //             mod_req_q.worker,
-    //             mod_req_q.load_addr,
-    //             ctrl_ready_q);
-    //     end
-    // end
 
 endmodule
 

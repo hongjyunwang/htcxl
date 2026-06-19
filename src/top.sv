@@ -5,6 +5,8 @@ module top #(
     parameter int RELEASE_SET_DEPTH = 16,
     parameter int CXL_TABLE_DEPTH = 32,
 
+    parameter int BUF_DEPTH = 16, // wr_buf FIFO depth
+
     parameter int MEM_DEPTH = 1024, // stub memory size (words)
     parameter int MEM_LATENCY = 1 // stub read latency in cycles (>=1)
 )(
@@ -20,20 +22,38 @@ module top #(
     input logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_i,
 
     output logic [NUM_NODES-1:0] req_ready_o,
-    output logic [NUM_NODES-1:0] resp_valid_o,
-    output logic [1:0] comp_signal_o,
-    output logic [DATA_W-1:0] load_data_o
+
+    // Controller-driven completion (TX_ABORT only)
+    output logic [NUM_NODES-1:0] ctrl_resp_valid_o,
+    output logic [1:0] ctrl_comp_signal_o,
+
+    // wr_buf-driven completion (LOAD only)
+    output logic buf_resp_valid_o,
+    output logic [NUM_NODES-1:0] buf_resp_worker_o,
+    output logic [DATA_W-1:0] buf_resp_rdata_o
 );
 
-    // Internal Wires
+    // Controller <-> buffer wires
     logic mem_req_valid;
     logic mem_we;
     logic [ADDR_W-1:0] mem_addr;
     logic [DATA_W-1:0] mem_wdata;
-    logic [DATA_W-1:0] mem_rdata;
-    logic mem_rvalid;
+    logic [NUM_NODES-1:0] mem_worker;
+    logic [1:0] mem_req_type;
+    logic buffer_full;
+    logic buf_push_ready;
 
-    // DUT
+    // buffer <-> memory pool wires
+    logic pop_valid;
+    logic pop_we;
+    logic [ADDR_W-1:0] pop_addr;
+    logic [DATA_W-1:0] pop_wdata;
+    logic [NUM_NODES-1:0] pop_worker;
+    logic [1:0] pop_req_type;
+    logic mem_ready;
+    logic [DATA_W-1:0] mem_rdata;
+
+    // ================ Controller ================
     cxl_controller #(
         .DATA_W(DATA_W),
         .ADDR_W(ADDR_W),
@@ -52,21 +72,61 @@ module top #(
         .release_addr_i(release_addr_i),
         .release_data_i(release_data_i),
 
-        .mem_rvalid_i(mem_rvalid),
-        .mem_rdata_i(mem_rdata),
+        .buffer_full_i(buffer_full),
 
         .req_ready_o(req_ready_o),
-        .resp_valid_o(resp_valid_o),
-        .comp_signal_o(comp_signal_o),
-        .load_data_o(load_data_o),
+        .resp_valid_o(ctrl_resp_valid_o),
+        .comp_signal_o(ctrl_comp_signal_o),
 
         .mem_req_valid_o(mem_req_valid),
         .mem_we_o(mem_we),
         .mem_addr_o(mem_addr),
-        .mem_wdata_o(mem_wdata)
+        .mem_wdata_o(mem_wdata),
+        .mem_worker_o(mem_worker),
+        .mem_req_type_o(mem_req_type)
     );
 
-    // memory pool
+    // ================ Write Buffer (FIFO between controller and memory) ================
+    wr_buf #(
+        .NUM_NODES(NUM_NODES),
+        .DATA_W(DATA_W),
+        .ADDR_W(ADDR_W),
+        .DEPTH(BUF_DEPTH)
+    ) buf_inst (
+        .clk_i(clk_i),
+        .rst_i(rst_i),
+
+        // Push side <- controller
+        .push_valid_i(mem_req_valid),
+        .push_we_i(mem_we),
+        .push_addr_i(mem_addr),
+        .push_wdata_i(mem_wdata),
+        .push_worker_i(mem_worker),
+        .push_req_type_i(mem_req_type),
+        .push_ready_o(buf_push_ready),
+
+        // Pop side -> memory pool
+        .pop_valid_o(pop_valid),
+        .pop_we_o(pop_we),
+        .pop_addr_o(pop_addr),
+        .pop_wdata_o(pop_wdata),
+        .pop_worker_o(pop_worker),
+        .pop_req_type_o(pop_req_type),
+
+        // From memory pool
+        .mem_ready_i(mem_ready),
+        .mem_rdata_i(mem_rdata),
+
+        // To nodes
+        .resp_valid_o(buf_resp_valid_o),
+        .resp_worker_o(buf_resp_worker_o),
+        .resp_rdata_o(buf_resp_rdata_o)
+    );
+
+    // buffer_full_i to controller is the inverse of push_ready_o
+    assign buffer_full = !buf_push_ready;
+
+    // ================ Memory Pool Stub ================
     mem_pool_stub #(
         .DATA_W(DATA_W),
         .ADDR_W(ADDR_W),
@@ -75,12 +135,12 @@ module top #(
     ) mem (
         .clk_i(clk_i),
         .rst_i(rst_i),
-        .mem_req_valid_i(mem_req_valid),
-        .mem_we_i(mem_we),
-        .mem_addr_i(mem_addr),
-        .mem_wdata_i(mem_wdata),
+        .mem_req_valid_i(pop_valid),
+        .mem_we_i(pop_we),
+        .mem_addr_i(pop_addr),
+        .mem_wdata_i(pop_wdata),
         .mem_rdata_o(mem_rdata),
-        .mem_rvalid_o(mem_rvalid)
+        .mem_rvalid_o(mem_ready)
     );
 
 endmodule

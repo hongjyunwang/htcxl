@@ -7,6 +7,7 @@ module tb_cxl_controller;
     localparam int NUM_NODES = 4;
     localparam int RELEASE_SET_DEPTH = 16;
     localparam int CXL_TABLE_DEPTH = 32;
+    localparam int BUF_DEPTH = 16;
     localparam int MEM_DEPTH = 1024;
     localparam int MEM_LATENCY = 1;
 
@@ -26,9 +27,15 @@ module tb_cxl_controller;
     logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data;
 
     logic [NUM_NODES-1:0] req_ready;
-    logic [NUM_NODES-1:0] resp_valid;
-    logic [1:0] comp_signal;
-    logic [DATA_W-1:0] load_data;
+
+    // Controller-driven completion (TX_ABORT only)
+    logic [NUM_NODES-1:0] ctrl_resp_valid;
+    logic [1:0] ctrl_comp_signal;
+
+    // wr_buf-driven completion (LOAD only)
+    logic buf_resp_valid;
+    logic [NUM_NODES-1:0] buf_resp_worker;
+    logic [DATA_W-1:0] buf_resp_rdata;
 
     // DUT
     top #(
@@ -37,6 +44,7 @@ module tb_cxl_controller;
         .NUM_NODES(NUM_NODES),
         .RELEASE_SET_DEPTH(RELEASE_SET_DEPTH), 
         .CXL_TABLE_DEPTH(CXL_TABLE_DEPTH),
+        .BUF_DEPTH(BUF_DEPTH),
         .MEM_DEPTH(MEM_DEPTH), 
         .MEM_LATENCY(MEM_LATENCY)
     ) top_inst (
@@ -50,9 +58,11 @@ module tb_cxl_controller;
         .release_addr_i(release_addr), 
         .release_data_i(release_data),
         .req_ready_o(req_ready),
-        .resp_valid_o(resp_valid),
-        .comp_signal_o(comp_signal), 
-        .load_data_o(load_data)
+        .ctrl_resp_valid_o(ctrl_resp_valid),
+        .ctrl_comp_signal_o(ctrl_comp_signal),
+        .buf_resp_valid_o(buf_resp_valid),
+        .buf_resp_worker_o(buf_resp_worker),
+        .buf_resp_rdata_o(buf_resp_rdata)
     );
 
     // Clock generation and watchdog
@@ -65,7 +75,10 @@ module tb_cxl_controller;
     end
     always #5 clk = ~clk; // 10ns clock period
 
-    // Drive a cxl request (LOAD, Tx_Commit, or Tx_Abort) and complete the valid/ready handshake
+    // Drive a cxl request (LOAD, Tx_Commit, or Tx_Abort) and complete the valid/ready handshake.
+    // Watches the correct response path based on which command was issued:
+    //   CMD_LOAD       -> buf_resp_valid / buf_resp_worker / buf_resp_rdata (from wr_buf)
+    //   CMD_TX_ABORT   -> ctrl_resp_valid / ctrl_comp_signal (from controller)
     task automatic issue_request(
         input logic [1:0] cmd,
         input logic [NUM_NODES-1:0] node,
@@ -83,9 +96,20 @@ module tb_cxl_controller;
         @(negedge clk);
         req_valid = '0;
 
-        while (!(resp_valid & node)) @(negedge clk);  // check own bit, not whole vector
-
-        $display("[%0t] TB: response received (node=%b comp=%0d data=%0h)", $time, node, comp_signal, load_data);
+        if (cmd == CMD_LOAD) begin
+            // LOAD completion comes from wr_buf — resp_worker is a one-hot tag,
+            // not gated per-node like the old resp_valid vector was
+            while (!(buf_resp_valid && (buf_resp_worker == node))) @(negedge clk);
+            $display("[%0t] TB: LOAD response received (node=%b data=%0h)",
+                      $time, node, buf_resp_rdata);
+        end else if (cmd == CMD_TX_ABORT) begin
+            while (!(ctrl_resp_valid & node)) @(negedge clk);
+            $display("[%0t] TB: TX_ABORT response received (node=%b comp=%0d)",
+                      $time, node, ctrl_comp_signal);
+        end else begin
+            // CMD_TX_COMMIT — placeholder, no completion path defined yet
+            $display("[%0t] TB: TX_COMMIT issued, no completion tracking implemented", $time);
+        end
     endtask
 
     initial begin
@@ -104,7 +128,8 @@ module tb_cxl_controller;
         rst = 1'b0;
         @(posedge clk);
 
-        // Preload memory at address 5
+        // Preload memory at address 5 — note the hierarchy now goes through
+        // wr_buf, so the memory stub is at top_inst.mem (unchanged path)
         top_inst.mem.mem[5] = 64'hDEAD_BEEF_0000_0001;
         $display("[%0t] TB: preloaded mem[5] = %h", $time, top_inst.mem.mem[5]);
 

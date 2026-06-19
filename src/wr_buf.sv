@@ -7,16 +7,22 @@ module wr_buf #(
     input  logic clk_i,
     input  logic rst_i,
 
-    // Push port (from cxl controller)
+    // Input from cxl controller
     input logic push_valid_i, // handshake
     input logic push_we_i,
     input logic [ADDR_W-1:0] push_addr_i,
     input logic [DATA_W-1:0] push_wdata_i,
     input logic [NUM_NODES-1:0] push_worker_i,
     input logic [1:0] push_req_type_i,
+
+    // Output to cxl controller
     output logic push_ready_o, // FIFO not full
 
-    // Pop port (to memory pool)
+    // Input from the memory pool
+    input logic mem_ready_i,
+    input logic [DATA_W-1:0] mem_rdata_i,
+
+    // Output to memory pool
     output logic pop_valid_o,
     output logic pop_we_o,
     output logic [ADDR_W-1:0] pop_addr_o,
@@ -24,12 +30,8 @@ module wr_buf #(
     output logic [NUM_NODES-1:0] pop_worker_o,
     output logic [1:0] pop_req_type_o,
 
-    // input from the memory pool
-    input logic mem_ready_i,
-    input logic [DATA_W-1:0] mem_rdata_i,
-
     // Output to the nodes 
-    output logic resp_valid_o, // handshake to nodes
+    output logic resp_valid_o, // handshake to nodes, signal completion
     output logic [NUM_NODES-1:0] resp_worker_o, // which node gets the memory response
     output logic [DATA_W-1:0] resp_rdata_o
 );
