@@ -16,7 +16,7 @@ module cxl_controller #(
     input logic [1:0] tx_signal_i, // 00: CMD_LOAD, 01: CMD_TX_ABORT, 10: CMD_TX_COMMIT
     input logic [ADDR_W-1:0] load_addr_i, // Used for CMD_LOAD
 
-    // Release set inputs:
+    // Release set inputs
     input logic [RELEASE_SET_DEPTH-1:0] release_valid_i, // release set valid mark
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i, // release set write mark
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i, // release set address
@@ -84,9 +84,9 @@ module cxl_controller #(
         logic [RELEASE_SET_DEPTH][ADDR_W-1:0] release_addr;
         logic [RELEASE_SET_DEPTH][DATA_W-1:0] release_data;
 
-        logic [CXL_TABLE_DEPTH-1:0] cxl_release_mask;
-        logic cxl_upd_alloc;
-        logic [CXL_IDX_W-1:0] cxl_upd_idx;
+        // logic [CXL_TABLE_DEPTH-1:0] cxl_release_mask;
+        // logic cxl_upd_alloc;
+        // logic [CXL_IDX_W-1:0] cxl_upd_idx;
     } idle_mod_t;
     // MOD -> REQ
     typedef struct packed {
