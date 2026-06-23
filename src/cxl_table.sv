@@ -120,9 +120,9 @@ endfunction
 //   SEQ_DRAIN : no more entries to feed, wait for pipeline to drain
 //   SEQ_DONE  : pulse req_compl_o, return to IDLE
 //
-// For Tx_Abort and Tx_Commit, after SEQ_WRITE the sequencer checks whether there
-// are more valid release set entries. If yes it loops back to SEQ_READ with
-// seq_ptr incremented. If no, it goes to SEQ_DONE.
+// No hazard detection needed: release sets are guaranteed to have no duplicate
+// addresses, and we do not pipeline multiple LOADs. Each entry in flight always
+// touches a distinct set index from all others currently in the pipeline.
 
 typedef enum logic [2:0] {
     SEQ_IDLE  = 3'd0,
@@ -186,27 +186,6 @@ always_comb begin
     else alloc_way = lru_q[cur_set_index]; // both valid, evict LRU
 end
 
-// ================ Scoreboard ================
-// Tracks set indices currently in MOD and WRITE stages
-// to detect RAW hazards within a single request's release set
-
-logic scoreboard_mod_valid_q,   scoreboard_mod_valid_d;
-logic scoreboard_write_valid_q, scoreboard_write_valid_d;
-logic [SET_IDX_W-1:0] scoreboard_mod_idx_q,   scoreboard_mod_idx_d;
-logic [SET_IDX_W-1:0] scoreboard_write_idx_q, scoreboard_write_idx_d;
-
-// Hazard detected when incoming set index matches anything in-flight
-logic hazard;
-always_comb begin
-    hazard = 1'b0;
-    if (scoreboard_mod_valid_q &&
-        scoreboard_mod_idx_q == cur_set_index)
-        hazard = 1'b1;
-    if (scoreboard_write_valid_q &&
-        scoreboard_write_idx_q == cur_set_index)
-        hazard = 1'b1;
-end
-
 // ================ Pipeline Stage Registers ================
 // READ -> MOD
 typedef struct packed {
@@ -250,10 +229,6 @@ always_comb begin
     seq_ptr_d = seq_ptr_q;
     read_mod_d = read_mod_q;
     mod_write_d = mod_write_q;
-    scoreboard_mod_valid_d = scoreboard_mod_valid_q;
-    scoreboard_write_valid_d = scoreboard_write_valid_q;
-    scoreboard_mod_idx_d = scoreboard_mod_idx_q;
-    scoreboard_write_idx_d = scoreboard_write_idx_q;
 
     ce_way0 = 1'b0; ce_way1 = 1'b0;
     we_way0 = 1'b0; we_way1 = 1'b0;
@@ -272,7 +247,7 @@ always_comb begin
     mod_any_hit = mod_hit0 || mod_hit1;
     mod_hit_way = mod_hit1;
     mod_hit_checkout = mod_hit1 ? r_checkout1 : r_checkout0;
-    mod_hit_inprog = mod_hit1 ? r_inprog1   : r_inprog0;
+    mod_hit_inprog = mod_hit1 ? r_inprog1 : r_inprog0;
     mod_alloc_way = (!r_valid0) ? 1'b0 :
                     (!r_valid1) ? 1'b1 :
                     lru_q[read_mod_q.set_index];
@@ -293,8 +268,6 @@ always_comb begin
             busy_o = 1'b0;
             read_mod_d.valid = 1'b0;
             mod_write_d.valid = 1'b0;
-            scoreboard_mod_valid_d = 1'b0;
-            scoreboard_write_valid_d = 1'b0;
             if (controller_valid_i) begin
                 seq_state_d = SEQ_READ;
                 seq_ptr_d = '0;
@@ -302,42 +275,32 @@ always_comb begin
         end
 
         SEQ_READ: begin
-            if (hazard) begin
-                // Stall: hold seq_ptr, do not issue SRAM read this cycle
-                // downstream stages (MOD, WRITE) continue draining normally
-                read_mod_d.valid = 1'b0; // inject bubble
-            end else begin
-                // Issue SRAM read for current entry
-                ce_way0 = 1'b1; ce_way1 = 1'b1;
-                we_way0 = 1'b0; we_way1 = 1'b0;
-                set_index = cur_set_index;
+            // Issue SRAM read for current entry — no hazard check needed
+            ce_way0 = 1'b1; ce_way1 = 1'b1;
+            we_way0 = 1'b0; we_way1 = 1'b0;
+            set_index = cur_set_index;
 
-                // Fill READ->MOD register
-                read_mod_d.valid = 1'b1;
-                read_mod_d.set_index = cur_set_index;
-                read_mod_d.tag = cur_tag;
-                read_mod_d.req_type = lat_req_type_q;
-                read_mod_d.req_node = lat_req_node_q;
+            // Fill READ->MOD register
+            read_mod_d.valid = 1'b1;
+            read_mod_d.set_index = cur_set_index;
+            read_mod_d.tag = cur_tag;
+            read_mod_d.req_type = lat_req_type_q;
+            read_mod_d.req_node = lat_req_node_q;
 
-                // Update scoreboard: this entry is entering MOD next cycle
-                scoreboard_mod_valid_d = 1'b1;
-                scoreboard_mod_idx_d = cur_set_index;
-
-                // Advance pointer to next valid entry for next cycle
-                begin : find_next
-                    logic found_next;
-                    found_next = 1'b0;
-                    seq_ptr_d = seq_ptr_q;
-                    for (int i = seq_ptr_q + 1; i < RELEASE_SET_DEPTH; i++) begin
-                        if (!found_next && lat_rel_valid_q[i]) begin
-                            seq_ptr_d = SEQ_PTR_W'(i);
-                            found_next = 1'b1;
-                        end
+            // Advance pointer to next valid entry for next cycle
+            begin : find_next
+                logic found_next;
+                found_next = 1'b0;
+                seq_ptr_d = seq_ptr_q;
+                for (int i = seq_ptr_q + 1; i < RELEASE_SET_DEPTH; i++) begin
+                    if (!found_next && lat_rel_valid_q[i]) begin
+                        seq_ptr_d = SEQ_PTR_W'(i);
+                        found_next = 1'b1;
                     end
-                    // If no next entry, move to drain remaining pipeline stages
-                    if (!found_next)
-                        seq_state_d = SEQ_DRAIN;
                 end
+                // If no next entry, move to drain remaining pipeline stages
+                if (!found_next)
+                    seq_state_d = SEQ_DRAIN;
             end
         end
 
@@ -358,11 +321,6 @@ always_comb begin
     endcase
 
     // ---- MOD stage (runs every cycle independently) ----
-    // Scoreboard advances: what was in MOD moves to WRITE, what was in READ moves to MOD
-    scoreboard_write_valid_d = read_mod_q.valid;
-    scoreboard_write_idx_d = read_mod_q.set_index;
-    scoreboard_mod_valid_d = 1'b0; // cleared here; SEQ_READ sets it if issuing a new read
-
     if (read_mod_q.valid) begin
         mod_write_d.valid = 1'b1;
         mod_write_d.set_index = read_mod_q.set_index;
@@ -428,10 +386,6 @@ always_ff @(posedge clk_i or posedge rst_i) begin
         seq_ptr_q <= '0;
         read_mod_q <= '0;
         mod_write_q <= '0;
-        scoreboard_mod_valid_q <= 1'b0;
-        scoreboard_write_valid_q <= 1'b0;
-        scoreboard_mod_idx_q <= '0;
-        scoreboard_write_idx_q <= '0;
         lat_req_type_q <= '0;
         lat_req_node_q <= '0;
         lat_load_addr_q <= '0;
@@ -445,10 +399,6 @@ always_ff @(posedge clk_i or posedge rst_i) begin
         seq_ptr_q <= seq_ptr_d;
         read_mod_q <= read_mod_d;
         mod_write_q <= mod_write_d;
-        scoreboard_mod_valid_q <= scoreboard_mod_valid_d;
-        scoreboard_write_valid_q <= scoreboard_write_valid_d;
-        scoreboard_mod_idx_q <= scoreboard_mod_idx_d;
-        scoreboard_write_idx_q <= scoreboard_write_idx_d;
 
         if (seq_state_q == SEQ_IDLE && controller_valid_i) begin
             lat_req_type_q <= req_type_i;
