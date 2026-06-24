@@ -50,7 +50,7 @@ logic [SET_IDX_W-1:0] set_index;
 logic [SRAM_W-1:0] wdata_way0, wdata_way1;
 logic [SRAM_W-1:0] rdata_way0, rdata_way1;
 
-cxl_table_sram #(
+sram #(
     .DATA_W(SRAM_W),
     .DEPTH(NUM_SETS)
 ) sram_way0 (
@@ -62,7 +62,7 @@ cxl_table_sram #(
     .rdata_o(rdata_way0)
 );
 
-cxl_table_sram #(
+sram #(
     .DATA_W(SRAM_W),
     .DEPTH(NUM_SETS)
 ) sram_way1 (
@@ -88,19 +88,18 @@ function automatic logic [TAG_W-1:0] get_tag(input logic [ADDR_W-1:0] addr);
 endfunction
 
 // Unpack a raw SRAM word into its fields
-function automatic void unpack_entry(
+task automatic unpack_entry(
     input  logic [SRAM_W-1:0] word,
     output logic valid,
     output logic [TAG_W-1:0] tag,
     output logic [NUM_NODES-1:0] checkout_vec,
     output logic [NUM_NODES-1:0] inprog_vec
 );
-    // Bit layout (MSB→LSB): [ valid | tag | checkout_vec | inprog_vec ]
-    inprog_vec = word[NUM_NODES-1 : 0];
+    inprog_vec   = word[NUM_NODES-1 : 0];
     checkout_vec = word[2*NUM_NODES-1 : NUM_NODES];
-    tag = word[2*NUM_NODES + TAG_W - 1 : 2*NUM_NODES];
-    valid = word[SRAM_W-1];
-endfunction
+    tag          = word[2*NUM_NODES + TAG_W - 1 : 2*NUM_NODES];
+    valid        = word[SRAM_W-1];
+endtask
 
 function automatic logic [SRAM_W-1:0] pack_entry(
     input logic valid,
@@ -367,6 +366,7 @@ always_comb begin
 
     // ---- WRITE stage (runs every cycle independently) ----
     if (mod_write_q.valid) begin
+        set_index = mod_write_q.set_index;
         if (write_way == 1'b0) begin
             ce_way0 = 1'b1;
             we_way0 = 1'b1;
@@ -413,6 +413,16 @@ always_ff @(posedge clk_i or posedge rst_i) begin
         // Update LRU on any MOD stage hit
         if (read_mod_q.valid && mod_any_hit)
             lru_q[read_mod_q.set_index] <= mod_hit_way;
+
+        if (mod_write_q.valid)
+            $display("[t=%0t] WRITE: way=%0b set=%0d valid=%0b tag=%0h checkout=%0b inprog=%0b",
+                $time,
+                write_way,
+                mod_write_q.set_index,
+                mod_write_q.new_valid,
+                mod_write_q.tag,
+                mod_write_q.new_checkout,
+                mod_write_q.new_inprog);
     end
 end
 

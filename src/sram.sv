@@ -19,6 +19,13 @@ module sram  #(
 
     logic [DATA_W-1:0] mem [0:DEPTH-1];
 
+    // Initialize
+    integer i;
+    initial begin
+        for (i = 0; i < DEPTH; i = i + 1)
+            mem[i] = '0;
+    end
+
     // rw takes one cycle each
     always_ff @(posedge clk_i) begin
         if (ce_i) begin
