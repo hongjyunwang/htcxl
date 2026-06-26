@@ -26,7 +26,7 @@ module cxl_table#(
     output logic hit_o,
     output logic [NUM_NODES-1:0] check_out_o,
     output logic [NUM_NODES-1:0] in_progress_o,
-    output logic busy_o,
+    output logic busy_o, 
     output logic req_compl_o // completion signal of ENTIRE request, not one memory fetch
 );
 
@@ -95,10 +95,10 @@ task automatic unpack_entry(
     output logic [NUM_NODES-1:0] checkout_vec,
     output logic [NUM_NODES-1:0] inprog_vec
 );
-    inprog_vec   = word[NUM_NODES-1 : 0];
+    inprog_vec = word[NUM_NODES-1 : 0];
     checkout_vec = word[2*NUM_NODES-1 : NUM_NODES];
-    tag          = word[2*NUM_NODES + TAG_W - 1 : 2*NUM_NODES];
-    valid        = word[SRAM_W-1];
+    tag = word[2*NUM_NODES + TAG_W - 1 : 2*NUM_NODES];
+    valid = word[SRAM_W-1];
 endtask
 
 function automatic logic [SRAM_W-1:0] pack_entry(
@@ -110,7 +110,7 @@ function automatic logic [SRAM_W-1:0] pack_entry(
     return {valid, tag, checkout_vec, inprog_vec};
 endfunction
 
-// ================ Sequencer ================
+// ================ FSM ================
 // State machine:
 //   SEQ_IDLE  : waiting for controller_valid_i
 //   SEQ_READ  : assert ce to both SRAMs, present set_index (1 cycle)
@@ -124,12 +124,12 @@ endfunction
 // touches a distinct set index from all others currently in the pipeline.
 
 typedef enum logic [2:0] {
-    SEQ_IDLE  = 3'd0,
-    SEQ_READ  = 3'd1,
-    SEQ_MOD   = 3'd2,
+    SEQ_IDLE = 3'd0,
+    SEQ_READ = 3'd1,
+    SEQ_MOD = 3'd2,
     SEQ_WRITE = 3'd3,
     SEQ_DRAIN = 3'd4,
-    SEQ_DONE  = 3'd5
+    SEQ_DONE = 3'd5
 } seq_state_t;
 seq_state_t seq_state_q, seq_state_d;
 
@@ -144,6 +144,9 @@ logic [RELEASE_SET_DEPTH-1:0] lat_rel_valid_q;
 logic [RELEASE_SET_DEPTH-1:0] lat_rel_is_write_q;
 logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] lat_rel_addr_q;
 logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] lat_rel_data_q;
+
+
+// ================ Combinational Helpers ================
 
 // Active address being processed this iteration + parsing
 // For LOAD it is lat_load_addr_q; for ABORT/COMMIT it is lat_rel_addr_q[seq_ptr_q]
@@ -212,8 +215,7 @@ typedef struct packed {
 read_mod_t read_mod_q, read_mod_d;
 mod_write_t mod_write_q, mod_write_d;
 
-// Hoisted locals for MOD stage (iverilog does not support automatic variables
-// inside unnamed always_comb blocks)
+// Local storage for MOD stage 
 logic mod_hit0, mod_hit1, mod_any_hit;
 logic mod_hit_way;
 logic [NUM_NODES-1:0] mod_hit_checkout, mod_hit_inprog;
@@ -247,9 +249,7 @@ always_comb begin
     mod_hit_way = mod_hit1;
     mod_hit_checkout = mod_hit1 ? r_checkout1 : r_checkout0;
     mod_hit_inprog = mod_hit1 ? r_inprog1 : r_inprog0;
-    mod_alloc_way = (!r_valid0) ? 1'b0 :
-                    (!r_valid1) ? 1'b1 :
-                    lru_q[read_mod_q.set_index];
+    mod_alloc_way = (!r_valid0) ? 1'b0 : (!r_valid1) ? 1'b1 : lru_q[read_mod_q.set_index];
 
     // Hoisted WRITE stage combinational logic
     write_way = mod_write_q.hit ? mod_write_q.hit_way : mod_write_q.alloc_way;
@@ -273,14 +273,17 @@ always_comb begin
             end
         end
 
+        // ================ READ Stage ================
         SEQ_READ: begin
             // Issue SRAM read for current entry — no hazard check needed
-            ce_way0 = 1'b1; ce_way1 = 1'b1;
-            we_way0 = 1'b0; we_way1 = 1'b0;
+            ce_way0 = 1'b1; // read
+            ce_way1 = 1'b1; // read
+            we_way0 = 1'b0; // not write
+            we_way1 = 1'b0; // not write
             set_index = cur_set_index;
 
             // Fill READ->MOD register
-            read_mod_d.valid = 1'b1;
+            read_mod_d.valid = 1'b1; // move to MOD
             read_mod_d.set_index = cur_set_index;
             read_mod_d.tag = cur_tag;
             read_mod_d.req_type = lat_req_type_q;
@@ -319,7 +322,7 @@ always_comb begin
         default: seq_state_d = SEQ_IDLE;
     endcase
 
-    // ---- MOD stage (runs every cycle independently) ----
+    // ================ MOD stage ================
     if (read_mod_q.valid) begin
         mod_write_d.valid = 1'b1;
         mod_write_d.set_index = read_mod_q.set_index;
@@ -361,14 +364,15 @@ always_comb begin
         check_out_o = mod_hit_checkout;
         in_progress_o = mod_hit_inprog;
     end else begin
+        // Nothing more to do for this request
         mod_write_d.valid = 1'b0;
     end
 
-    // ---- WRITE stage (runs every cycle independently) ----
+    // ================ WRITE stage ================
     if (mod_write_q.valid) begin
         set_index = mod_write_q.set_index;
         if (write_way == 1'b0) begin
-            ce_way0 = 1'b1;
+            ce_way0 = 1'b1; // write not read
             we_way0 = 1'b1;
             wdata_way0 = write_packed_word;
         end else begin
@@ -423,6 +427,39 @@ always_ff @(posedge clk_i or posedge rst_i) begin
                 mod_write_q.tag,
                 mod_write_q.new_checkout,
                 mod_write_q.new_inprog);
+    end
+end
+
+always @(posedge clk_i) begin
+    if (!rst_i) begin
+        if (controller_valid_i)
+            $display("[%0t] CXL TABLE: request received (cmd=%0d node=%0b addr=%0h)",
+                $time, req_type_i, req_node_i, addr_i);
+        if (req_compl_o)
+            $display("[%0t] CXL TABLE: request complete", $time);
+    end
+end
+
+always @(posedge clk_i) begin
+    if (!rst_i) begin
+        if (seq_state_q == SEQ_READ)
+            $display("[%0t] CXL TABLE [SEQ_READ]: ptr=%0d cur_addr=%0h cur_set=%0d cur_tag=%0h",
+                $time, seq_ptr_q, cur_addr, cur_set_index, cur_tag);
+        if (read_mod_q.valid)
+            $display("[%0t] CXL TABLE [MOD]:      cmd=%0d node=%0b tag=%0h set=%0d hit=%0b checkout=%0b inprog=%0b",
+                $time, read_mod_q.req_type, read_mod_q.req_node,
+                read_mod_q.tag, read_mod_q.set_index,
+                mod_any_hit, mod_hit_checkout, mod_hit_inprog);
+        if (mod_write_q.valid)
+            $display("[%0t] CXL TABLE [WRITE]:    way=%0b set=%0d valid=%0b tag=%0h new_checkout=%0b new_inprog=%0b",
+                $time, write_way, mod_write_q.set_index,
+                mod_write_q.new_valid, mod_write_q.tag,
+                mod_write_q.new_checkout, mod_write_q.new_inprog);
+        if (seq_state_q == SEQ_DRAIN)
+            $display("[%0t] CXL TABLE [DRAIN]:    read_mod_valid=%0b mod_write_valid=%0b",
+                $time, read_mod_q.valid, mod_write_q.valid);
+        if (req_compl_o)
+            $display("[%0t] CXL TABLE [DONE]",  $time);
     end
 end
 

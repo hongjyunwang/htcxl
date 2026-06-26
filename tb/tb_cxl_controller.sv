@@ -85,7 +85,7 @@ module tb_cxl_controller;
         input logic [ADDR_W-1:0] addr
     );
         @(negedge clk);
-        while (!(req_ready & node)) @(negedge clk);  // also check own bit on req_ready
+        while ((req_ready & node) == '0) @(negedge clk);  // also check own bit on req_ready
 
         req_valid = node;
         tx_signal = cmd;
@@ -131,15 +131,44 @@ module tb_cxl_controller;
         // Preload memory at address 5 — note the hierarchy now goes through
         // wr_buf, so the memory stub is at top_inst.mem (unchanged path)
         top_inst.mem.mem[5] = 64'hDEAD_BEEF_0000_0001;
+        top_inst.mem.mem[10] = 64'hDEAD_BEEF_0000_0002;
+        top_inst.mem.mem[15] = 64'hDEAD_BEEF_0000_0003;
         $display("[%0t] TB: preloaded mem[5] = %h", $time, top_inst.mem.mem[5]);
+        $display("[%0t] TB: preloaded mem[10] = %h", $time, top_inst.mem.mem[10]);
+        $display("[%0t] TB: preloaded mem[15] = %h", $time, top_inst.mem.mem[15]);
 
-        fork
-            issue_request(CMD_LOAD, 4'b0001, 64'd5); // node 1, cycle N
-            begin
-                @(negedge clk); // wait one cycle behind node 1
-                issue_request(CMD_LOAD, 4'b0010, 64'd5); // node 2, cycle N+1
-            end
-        join
+        // fork
+        //     issue_request(CMD_LOAD, 4'b0001, 64'd5); // node 1, cycle N
+        //     begin
+        //         @(negedge clk); // wait one cycle behind node 1
+        //         issue_request(CMD_LOAD, 4'b0010, 64'd5); // node 2, cycle N+1
+        //     end
+        // join
+
+        // TX_ABORT test — node 0001 aborts with address 5 in its release set
+        issue_request(CMD_LOAD, 4'b0001, 64'd5);
+        issue_request(CMD_LOAD, 4'b0001, 64'd10);
+        issue_request(CMD_LOAD, 4'b0001, 64'd15);
+
+        // Then abort with all three in the release set
+        begin
+            release_valid = '0;
+            release_valid[0] = 1;
+            release_valid[1] = 1;
+            release_valid[2] = 1;
+            release_is_write = '0;
+            release_addr[0] = 64'd5;
+            release_addr[1] = 64'd10;
+            release_addr[2] = 64'd15;
+            release_data = '0;
+
+            issue_request(CMD_TX_ABORT, 4'b0001, 64'd0);
+
+            release_valid = '0;
+            release_is_write = '0;
+            release_addr = '0;
+            release_data = '0;
+        end
 
         // Let it run so the state trace prints
         repeat (12) @(posedge clk);
@@ -153,5 +182,25 @@ module tb_cxl_controller;
         $dumpfile("tb_cxl_controller.vcd");
         $dumpvars(0, tb_cxl_controller);
     end
+    
+    // always @(negedge clk) begin
+    //     if (!rst) begin
+    //         if (top_inst.dut.dbg_mod_req_valid)
+    //             $display("[%0t] CTRL REQ stage: cmd=%0d node=%b addr=%0d",
+    //                 $time, top_inst.dut.dbg_mod_req_cmd,
+    //                 top_inst.dut.dbg_mod_req_worker,
+    //                 top_inst.dut.dbg_mod_req_addr);
+
+    //         if (top_inst.dut.mem_req_valid_o)
+    //             $display("[%0t] MEM REQ: we=%0b addr=%0d worker=%b",
+    //                 $time, top_inst.dut.mem_we_o,
+    //                 top_inst.dut.mem_addr_o,
+    //                 top_inst.dut.mem_worker_o);
+
+    //         if (buf_resp_valid)
+    //             $display("[%0t] TB RESP: worker=%b rdata=%0h",
+    //                 $time, buf_resp_worker, buf_resp_rdata);
+    //     end
+    // end
 
 endmodule

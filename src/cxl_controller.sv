@@ -59,19 +59,6 @@ module cxl_controller #(
     parameter logic [1:0] COMP_ABORT = 2'b10;
     parameter logic [1:0] COMP_COMMIT = 2'b11;
 
-    // ================ Building CXL Table ================
-    logic cxl_table_valid_q [CXL_TABLE_DEPTH];
-    logic [ADDR_W-1:0] cxl_table_addr_q [CXL_TABLE_DEPTH];
-    logic [NUM_NODES-1:0] cxl_table_checkout_vec_q [CXL_TABLE_DEPTH];
-    logic [NUM_NODES-1:0] cxl_table_in_progress_vec_q [CXL_TABLE_DEPTH];
-    logic cxl_table_locked_q [CXL_TABLE_DEPTH];
-
-    logic cxl_table_valid_d [CXL_TABLE_DEPTH];
-    logic [ADDR_W-1:0] cxl_table_addr_d [CXL_TABLE_DEPTH];
-    logic [NUM_NODES-1:0] cxl_table_checkout_vec_d [CXL_TABLE_DEPTH];
-    logic [NUM_NODES-1:0] cxl_table_in_progress_vec_d [CXL_TABLE_DEPTH];
-    logic cxl_table_locked_d [CXL_TABLE_DEPTH];
-
     // ================ Pipeline Registers ================
     // IDLE -> MOD
     typedef struct packed {
@@ -83,10 +70,6 @@ module cxl_controller #(
         logic [RELEASE_SET_DEPTH-1:0] release_is_write;
         logic [RELEASE_SET_DEPTH][ADDR_W-1:0] release_addr;
         logic [RELEASE_SET_DEPTH][DATA_W-1:0] release_data;
-
-        // logic [CXL_TABLE_DEPTH-1:0] cxl_release_mask;
-        // logic cxl_upd_alloc;
-        // logic [CXL_IDX_W-1:0] cxl_upd_idx;
     } idle_mod_t;
     // MOD -> REQ
     typedef struct packed {
@@ -95,24 +78,47 @@ module cxl_controller #(
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
     } mod_req_t;
-    // REQ -> RESP
-    // typedef struct packed {
-    //     logic valid;
-    //     logic [NUM_NODES-1:0] worker;
-    //     logic [1:0] request_type;
-    //     logic [DATA_W-1:0] resp_data;
-    // } req_resp_t;
-    // q is present, d is next state
     idle_mod_t idle_mod_q, idle_mod_d;
     mod_req_t mod_req_q, mod_req_d;
-    // req_resp_t req_resp_q, req_resp_d;
+
+
+    // ================ Building CXL Table ================
+    logic cxl_hit;
+    logic [NUM_NODES-1:0] cxl_checkout;
+    logic [NUM_NODES-1:0] cxl_inprog;
+    logic cxl_busy;
+    logic cxl_req_compl;
+
+    cxl_table #(
+        .DATA_W(DATA_W),
+        .ADDR_W(ADDR_W),
+        .NUM_NODES(NUM_NODES),
+        .RELEASE_SET_DEPTH(RELEASE_SET_DEPTH),
+        .CXL_TABLE_DEPTH(CXL_TABLE_DEPTH)
+    ) u_cxl_table (
+        .clk_i(clk_i),
+        .rst_i(rst_i),
+        .controller_valid_i(idle_mod_q.valid && !cxl_busy), // valid cxl update request
+        .req_type_i(idle_mod_q.request_type),
+        .req_node_i(idle_mod_q.worker),
+        .addr_i(idle_mod_q.load_addr),
+        .release_valid_i(idle_mod_q.release_valid),
+        .release_is_write_i(idle_mod_q.release_is_write),
+        .release_addr_i(idle_mod_q.release_addr),
+        .release_data_i(idle_mod_q.release_data),
+
+        .hit_o(cxl_hit),
+        .check_out_o(cxl_checkout),
+        .in_progress_o(cxl_inprog),
+        .busy_o(cxl_busy),
+        .req_compl_o(cxl_req_compl)
+    );
 
     // Set next register state
     always_comb begin
         // Default
         idle_mod_d = idle_mod_q;
         mod_req_d = mod_req_q;
-        // req_resp_d = req_resp_q;
 
         // IDLE -> MOD
         idle_mod_d.valid = (req_valid_i != '0);
@@ -129,87 +135,6 @@ module cxl_controller #(
         mod_req_d.worker = idle_mod_q.worker;
         mod_req_d.request_type = idle_mod_q.request_type;
         mod_req_d.load_addr = idle_mod_q.load_addr;
-
-        // REQ -> RESP
-        // req_resp_d.valid = mem_rvalid_i && mod_req_q.valid;
-        // req_resp_d.worker = mod_req_q.worker;
-        // req_resp_d.request_type = mod_req_q.request_type;
-        // req_resp_d.resp_data = mem_rdata_i;
-    end
-
-    // ================ MOD Stage ================
-    // Combinational CAM CXL Table lookup
-    wire [RELEASE_SET_DEPTH-1:0] local_release_valid;
-    assign local_release_valid = idle_mod_q.release_valid;
-    wire [RELEASE_SET_DEPTH-1:0] local_release_addr;
-    assign local_release_addr = idle_mod_q.release_addr;
-    always_comb begin
-        // Default: hold current values
-        for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
-            cxl_table_valid_d[k] = cxl_table_valid_q[k];
-            cxl_table_addr_d[k] = cxl_table_addr_q[k];
-            cxl_table_checkout_vec_d[k] = cxl_table_checkout_vec_q[k];
-            cxl_table_in_progress_vec_d[k] = cxl_table_in_progress_vec_q[k];
-            cxl_table_locked_d[k] = cxl_table_locked_q[k];
-        end
-
-        if (idle_mod_q.valid) begin
-            unique case (idle_mod_q.request_type)
-                CMD_LOAD: begin
-                    logic hit_found;
-                    hit_found = 1'b0;
-
-                    // scan cxl table for hit
-                    for (int i = 0; i < CXL_TABLE_DEPTH; i++) begin
-                        if (cxl_table_valid_q[i] && (cxl_table_addr_q[i] == idle_mod_q.load_addr)) begin
-                            // Existing entry: OR in this worker's checkout bit, clear its in_progress bit
-                            cxl_table_checkout_vec_d[i] = cxl_table_checkout_vec_q[i] | idle_mod_q.worker;
-                            cxl_table_in_progress_vec_d[i] = cxl_table_in_progress_vec_q[i] & ~idle_mod_q.worker;
-                            hit_found = 1'b1;
-                        end
-                    end
-                    // logically no hit, so scan cxl table for first free entry
-                    for (int i = CXL_TABLE_DEPTH-1; i >= 0; i--) begin
-                        logic alloc_done;
-                        alloc_done = 1'b0;
-                        if (!hit_found && !alloc_done && !cxl_table_valid_q[i]) begin
-                            // New entry allocation
-                            cxl_table_valid_d[i] = 1'b1;
-                            cxl_table_addr_d[i] = idle_mod_q.load_addr;
-                            cxl_table_checkout_vec_d[i] = idle_mod_q.worker;
-                            cxl_table_in_progress_vec_d[i] = '0;
-                            cxl_table_locked_d[i] = 1'b0;
-                            alloc_done = 1'b1;
-                        end
-                    end
-                    // Need CXL Table full detection
-                end
-
-                CMD_TX_ABORT : begin
-                    for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
-                        if (local_release_valid[i]) begin
-                            for (int j = 0; j < CXL_TABLE_DEPTH; j++) begin
-                                if (cxl_table_valid_q[j] && cxl_table_addr_q[j] == local_release_addr[i]) begin
-                                    cxl_table_checkout_vec_d[j] = cxl_table_checkout_vec_q[j] & ~idle_mod_q.worker;
-                                    // If removing node makes entry invalid, mark invalid
-                                    if ((cxl_table_checkout_vec_q[j] & ~idle_mod_q.worker) == '0) begin
-                                        cxl_table_valid_d[j] = 1'b0;
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-
-                CMD_TX_COMMIT: begin
-                    // Placeholder
-                end
-
-                default: begin
-                    // Placeholder
-                end
-            endcase
-        end 
     end
 
     // ================ REQ Stage ================
@@ -253,38 +178,10 @@ module cxl_controller #(
             end
         endcase
 
-        // Stall purely on the buffer being full
-        req_stall = mod_req_q.valid && (mod_req_q.request_type == CMD_LOAD) && buffer_full_i;
+        // Stall purely on the buffer being full or cxl table processing
+        req_stall = (mod_req_q.valid && mod_req_q.request_type == CMD_LOAD && buffer_full_i) || cxl_busy;
+
     end
-
-    // // ================ RESP Stage ================
-    // // Drive node response ports 
-    // always_comb begin
-    //     // default
-    //     resp_valid_o = '0;
-    //     comp_signal_o = '0;
-    //     load_data_o = '0;
-    //     unique case (req_resp_q.request_type)
-    //         CMD_LOAD: begin
-    //             resp_valid_o = req_resp_q.valid ? req_resp_q.worker : '0;
-    //             comp_signal_o = req_resp_q.request_type;
-    //             load_data_o = req_resp_q.resp_data;
-    //         end
-
-    //         CMD_TX_ABORT : begin
-    //             resp_valid_o = req_resp_q.valid ? req_resp_q.worker : '0;
-    //             comp_signal_o = req_resp_q.request_type;
-    //         end
-
-    //         CMD_TX_COMMIT: begin
-    //             // Placeholder
-    //         end
-
-    //         default: begin
-    //             // Placeholder
-    //         end
-    //     endcase
-    // end
 
     // Sequential logic
     logic ctrl_ready_q;
@@ -294,30 +191,23 @@ module cxl_controller #(
             ctrl_ready_q <= 1'b1;
             idle_mod_q <= '0;
             mod_req_q <= '0;
-            for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
-                cxl_table_valid_q[k] <= 1'b0;
-                cxl_table_addr_q[k] <= '0;
-                cxl_table_checkout_vec_q[k] <= '0;
-                cxl_table_in_progress_vec_q[k] <= '0;
-                cxl_table_locked_q[k] <= 1'b0;
-            end
         end else begin
-            ctrl_ready_q <= !req_stall;
-            if (!req_stall) begin
-                // pipeline is free to advance
+            // Accept new request only when truly idle (no request in flight)
+            if (!idle_mod_q.valid && idle_mod_d.valid) begin
                 idle_mod_q <= idle_mod_d;
-                mod_req_q <= mod_req_d;
-                for (int k = 0; k < CXL_TABLE_DEPTH; k++) begin
-                    cxl_table_valid_q[k] <= cxl_table_valid_d[k];
-                    cxl_table_addr_q[k] <= cxl_table_addr_d[k];
-                    cxl_table_checkout_vec_q[k] <= cxl_table_checkout_vec_d[k];
-                    cxl_table_in_progress_vec_q[k] <= cxl_table_in_progress_vec_d[k];
-                    cxl_table_locked_q[k] <= cxl_table_locked_d[k];
-                end
+                ctrl_ready_q <= 1'b0; // close the gate immediately
             end
-            // when stalled, mod_req_q simply holds — wr_buf will re-sample
-            // mem_req_valid_o every cycle until buffer_full_i drops, since
-            // mem_req_valid_o is purely combinational on mod_req_q now
+
+            // When cxl_table completes, advance to REQ stage and re-open gate
+            if (cxl_req_compl) begin
+                mod_req_q <= mod_req_d;
+                idle_mod_q <= '0;
+                ctrl_ready_q <= 1'b1; // ready to accept next request
+            end
+
+            // Clear mod_req_q one cycle after it fires
+            if (mod_req_q.valid)
+                mod_req_q <= '0;
         end
     end
 
@@ -329,11 +219,13 @@ module cxl_controller #(
 
             if (mod_req_q.valid)
                 $display("[%0t] CXL CONTROLLER [MOD→REQ]  node=%b addr=%0d", $time, mod_req_q.worker, mod_req_q.load_addr);
-
-            // if (req_resp_q.valid && req_resp_q.worker != 0)
-            //     $display("[%0t] CXL CONTROLLER [REQ→RESP] node=%b data=%h", $time, req_resp_q.worker, req_resp_q.resp_data);
         end
     end
+
+    wire dbg_mod_req_valid = mod_req_q.valid;
+    wire [1:0] dbg_mod_req_cmd = mod_req_q.request_type;
+    wire [NUM_NODES-1:0] dbg_mod_req_worker = mod_req_q.worker;
+    wire [ADDR_W-1:0] dbg_mod_req_addr = mod_req_q.load_addr;
 
 endmodule
 
