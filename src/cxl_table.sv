@@ -19,6 +19,7 @@ module cxl_table#(
     input logic [ADDR_W-1:0] addr_i, // single address for LOAD
     input logic [RELEASE_SET_DEPTH-1:0] release_valid_i,
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i,
+    input logic [RELEASE_SET_DEPTH-1:0] release_is_read_i,
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i,
     input logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_i,
 
@@ -27,7 +28,8 @@ module cxl_table#(
     output logic [NUM_NODES-1:0] check_out_o,
     output logic [NUM_NODES-1:0] in_progress_o,
     output logic busy_o, 
-    output logic req_compl_o // completion signal of ENTIRE request, not one memory fetch
+    output logic req_compl_o, // completion signal of ENTIRE request, not one memory fetch
+    output logic any_conflict_o // used for tx_commit
 );
 
 // ================ Parameters and SRAM Instantiation ================
@@ -142,8 +144,11 @@ logic [NUM_NODES-1:0] lat_req_node_q;
 logic [ADDR_W-1:0] lat_load_addr_q;
 logic [RELEASE_SET_DEPTH-1:0] lat_rel_valid_q;
 logic [RELEASE_SET_DEPTH-1:0] lat_rel_is_write_q;
+logic [RELEASE_SET_DEPTH-1:0] lat_rel_is_read_q;
 logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] lat_rel_addr_q;
 logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] lat_rel_data_q;
+
+logic any_conflict_q;
 
 
 // ================ Combinational Helpers ================
@@ -156,7 +161,7 @@ always_comb begin
     if (lat_req_type_q == CMD_LOAD)
         cur_addr = lat_load_addr_q;
     else
-    // Tx_ABORT or Tx_COMMIT -> use release set entry
+        // Tx_ABORT or Tx_COMMIT -> use release set entry
         cur_addr = lat_rel_addr_q[seq_ptr_q];
 end
 logic [SET_IDX_W-1:0] cur_set_index;
@@ -196,6 +201,8 @@ typedef struct packed {
     logic [TAG_W-1:0] tag;
     logic [1:0] req_type;
     logic [NUM_NODES-1:0] req_node;
+    logic is_write; // only meaningful for CMD_TX_COMMIT
+    logic is_read; // only meaningful for CMD_TX_COMMIT
 } read_mod_t;
 // MOD -> WRITE
 typedef struct packed {
@@ -215,13 +222,16 @@ typedef struct packed {
 read_mod_t read_mod_q, read_mod_d;
 mod_write_t mod_write_q, mod_write_d;
 
-// Local storage for MOD stage 
+// Local storage for MOD stage
 logic mod_hit0, mod_hit1, mod_any_hit;
 logic mod_hit_way;
 logic [NUM_NODES-1:0] mod_hit_checkout, mod_hit_inprog;
 logic mod_alloc_way;
 logic [SRAM_W-1:0] write_packed_word;
 logic write_way;
+logic entry_is_write_conflict; // for Tx_Commit conflict detection
+
+assign any_conflict_o = any_conflict_q;
 
 // ================ Sequencer FSM ================
 always_comb begin
@@ -242,16 +252,19 @@ always_comb begin
     check_out_o = '0;
     in_progress_o = '0;
 
-    // Hoisted MOD stage combinational logic
-    mod_hit0 = r_valid0 && (r_tag0 == read_mod_q.tag);
-    mod_hit1 = r_valid1 && (r_tag1 == read_mod_q.tag);
+    entry_is_write_conflict = '0;
+
+    // MOD stage combinational logic for LOAD
+    // indicators parsed from SRAM read results
+    mod_hit0 = r_valid0 && (r_tag0 == read_mod_q.tag); // way 0 hit indicator
+    mod_hit1 = r_valid1 && (r_tag1 == read_mod_q.tag); // way 1 hit indicator
     mod_any_hit = mod_hit0 || mod_hit1;
     mod_hit_way = mod_hit1;
     mod_hit_checkout = mod_hit1 ? r_checkout1 : r_checkout0;
     mod_hit_inprog = mod_hit1 ? r_inprog1 : r_inprog0;
     mod_alloc_way = (!r_valid0) ? 1'b0 : (!r_valid1) ? 1'b1 : lru_q[read_mod_q.set_index];
 
-    // Hoisted WRITE stage combinational logic
+    // WRITE stage combinational logic
     write_way = mod_write_q.hit ? mod_write_q.hit_way : mod_write_q.alloc_way;
     write_packed_word = pack_entry(
         mod_write_q.new_valid,
@@ -288,6 +301,8 @@ always_comb begin
             read_mod_d.tag = cur_tag;
             read_mod_d.req_type = lat_req_type_q;
             read_mod_d.req_node = lat_req_node_q;
+            read_mod_d.is_write = lat_rel_is_write_q[seq_ptr_q];
+            read_mod_d.is_read = lat_rel_is_read_q[seq_ptr_q];
 
             // Advance pointer to next valid entry for next cycle
             begin : find_next
@@ -295,10 +310,22 @@ always_comb begin
                 found_next = 1'b0;
                 seq_ptr_d = seq_ptr_q;
                 for (int i = seq_ptr_q + 1; i < RELEASE_SET_DEPTH; i++) begin
-                    if (!found_next && lat_rel_valid_q[i]) begin
-                        seq_ptr_d = SEQ_PTR_W'(i);
-                        found_next = 1'b1;
-                    end
+                    case (lat_req_type_q)
+                        // Tx_Abort, just check valid bit
+                        01: begin
+                            if (!found_next && lat_rel_valid_q[i]) begin
+                                seq_ptr_d = SEQ_PTR_W'(i);
+                                found_next = 1'b1;
+                            end
+                        end
+                        // Tx_Commit, check valid bit and .write or .read bit
+                        default: begin
+                            if (!found_next && lat_rel_valid_q[i] && (lat_rel_is_write_q[i] || lat_rel_is_read_q[i])) begin
+                                seq_ptr_d = SEQ_PTR_W'(i);
+                                found_next = 1'b1;
+                            end
+                        end
+                    endcase
                 end
                 // If no next entry, move to drain remaining pipeline stages
                 if (!found_next)
@@ -348,9 +375,24 @@ always_comb begin
                 mod_write_d.new_valid = ((mod_hit_checkout & ~read_mod_q.req_node) != '0);
             end
             CMD_TX_COMMIT: begin
-                mod_write_d.new_checkout = mod_hit_checkout & ~read_mod_q.req_node;
-                mod_write_d.new_inprog = mod_hit_inprog & ~read_mod_q.req_node;
-                mod_write_d.new_valid = ((mod_hit_checkout & ~read_mod_q.req_node) != '0);
+                // If a .write entry
+                if(read_mod_q.is_write) begin
+                    // should assert that there is always a hit
+                    // if conflict
+                    if((mod_hit_checkout & ~read_mod_q.req_node) != '0) begin
+                        // indicate CXL_ABORT
+                        entry_is_write_conflict = 1;
+                    end
+                    // Delete hostid from cxl table entry
+                    mod_write_d.new_checkout = mod_hit_checkout & ~read_mod_q.req_node;
+                    mod_write_d.new_valid = ((mod_hit_checkout & ~read_mod_q.req_node) != '0);
+                end
+                // .read entry
+                else begin
+                    // Delete hostid from cxl table entry
+                    mod_write_d.new_checkout = mod_hit_checkout & ~read_mod_q.req_node;
+                    mod_write_d.new_valid = ((mod_hit_checkout & ~read_mod_q.req_node) != '0);
+                end
             end
             default: begin
                 mod_write_d.new_checkout = mod_hit_checkout;
@@ -395,8 +437,11 @@ always_ff @(posedge clk_i or posedge rst_i) begin
         lat_load_addr_q <= '0;
         lat_rel_valid_q <= '0;
         lat_rel_is_write_q <= '0;
+        lat_rel_is_read_q <= '0;
         lat_rel_addr_q <= '0;
         lat_rel_data_q <= '0;
+        any_conflict_q <= '0;
+
         for (int i = 0; i < NUM_SETS; i++) lru_q[i] <= 1'b0;
     end else begin
         seq_state_q <= seq_state_d;
@@ -410,23 +455,19 @@ always_ff @(posedge clk_i or posedge rst_i) begin
             lat_load_addr_q <= addr_i;
             lat_rel_valid_q <= release_valid_i;
             lat_rel_is_write_q <= release_is_write_i;
+            lat_rel_is_read_q <= release_is_read_i;
             lat_rel_addr_q <= release_addr_i;
             lat_rel_data_q <= release_data_i;
+            any_conflict_q  <= 1'b0;
         end
 
+        // Set and keep any_conflict_q as 1 whenever a conflict is detected
+        if (read_mod_q.valid && read_mod_q.req_type == CMD_TX_COMMIT && entry_is_write_conflict)
+            any_conflict_q <= any_conflict_q | 1'b1;
+        
         // Update LRU on any MOD stage hit
         if (read_mod_q.valid && mod_any_hit)
             lru_q[read_mod_q.set_index] <= mod_hit_way;
-
-        if (mod_write_q.valid)
-            $display("[t=%0t] WRITE: way=%0b set=%0d valid=%0b tag=%0h checkout=%0b inprog=%0b",
-                $time,
-                write_way,
-                mod_write_q.set_index,
-                mod_write_q.new_valid,
-                mod_write_q.tag,
-                mod_write_q.new_checkout,
-                mod_write_q.new_inprog);
     end
 end
 

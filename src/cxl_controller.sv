@@ -19,19 +19,17 @@ module cxl_controller #(
     // Release set inputs
     input logic [RELEASE_SET_DEPTH-1:0] release_valid_i, // release set valid mark
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i, // release set write mark
+    input logic [RELEASE_SET_DEPTH-1:0] release_is_read_i, // release set read mark
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i, // release set address
     input logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_i, // release set data
 
     // Inputs from CXL memory pool (buffer)
     input logic buffer_full_i,
-    // input logic mem_rvalid_i,
-    // input logic [DATA_W-1:0] mem_rdata_i,
 
     // Outputs to hosts/nodes
     output logic [NUM_NODES-1:0] req_ready_o, // tell the host that CXL controller is ready to accept a new request from specifc nodes
     output logic [NUM_NODES-1:0] resp_valid_o, // handshake to signal completed request (only Tx_abort uses this)
     output logic [1:0] comp_signal_o, // type of request completed (only Tx_abort uses this)
-    // output logic [DATA_W-1:0] load_data_o,
 
     // Outputs to CXL memory pool (buffer)
     output logic mem_req_valid_o,
@@ -68,8 +66,9 @@ module cxl_controller #(
         logic [ADDR_W-1:0] load_addr;
         logic [RELEASE_SET_DEPTH-1:0] release_valid;
         logic [RELEASE_SET_DEPTH-1:0] release_is_write;
-        logic [RELEASE_SET_DEPTH][ADDR_W-1:0] release_addr;
-        logic [RELEASE_SET_DEPTH][DATA_W-1:0] release_data;
+        logic [RELEASE_SET_DEPTH-1:0] release_is_read;
+        logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr;
+        logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data;
     } idle_mod_t;
     // MOD -> REQ
     typedef struct packed {
@@ -80,7 +79,6 @@ module cxl_controller #(
     } mod_req_t;
     idle_mod_t idle_mod_q, idle_mod_d;
     mod_req_t mod_req_q, mod_req_d;
-
 
     // ================ Building CXL Table ================
     logic cxl_hit;
@@ -104,6 +102,7 @@ module cxl_controller #(
         .addr_i(idle_mod_q.load_addr),
         .release_valid_i(idle_mod_q.release_valid),
         .release_is_write_i(idle_mod_q.release_is_write),
+        .release_is_read_i(idle_mod_q.release_is_read),
         .release_addr_i(idle_mod_q.release_addr),
         .release_data_i(idle_mod_q.release_data),
 
@@ -127,6 +126,7 @@ module cxl_controller #(
         idle_mod_d.load_addr = load_addr_i;
         idle_mod_d.release_valid = release_valid_i;
         idle_mod_d.release_is_write = release_is_write_i;
+        idle_mod_d.release_is_read = release_is_read_i;
         idle_mod_d.release_addr = release_addr_i;
         idle_mod_d.release_data = release_data_i;
 
@@ -171,6 +171,7 @@ module cxl_controller #(
 
             CMD_TX_COMMIT: begin
                 // Placeholder
+
             end
 
             default: begin
@@ -193,6 +194,7 @@ module cxl_controller #(
             mod_req_q <= '0;
         end else begin
             // Accept new request only when truly idle (no request in flight)
+            // This also advances the pipeline into MOD stage
             if (!idle_mod_q.valid && idle_mod_d.valid) begin
                 idle_mod_q <= idle_mod_d;
                 ctrl_ready_q <= 1'b0; // close the gate immediately
@@ -228,4 +230,3 @@ module cxl_controller #(
     wire [ADDR_W-1:0] dbg_mod_req_addr = mod_req_q.load_addr;
 
 endmodule
-
