@@ -29,7 +29,7 @@ module cxl_controller #(
     // Outputs to hosts/nodes
     output logic [NUM_NODES-1:0] req_ready_o, // tell the host that CXL controller is ready to accept a new request from specifc nodes
     output logic [NUM_NODES-1:0] resp_valid_o, // handshake to signal completed request (only Tx_abort uses this)
-    output logic [1:0] comp_signal_o, // type of request completed (only Tx_abort uses this)
+    output logic [1:0] comp_signal_o, // type of request completed (only Tx_abort or abort in tx_commit uses this)
 
     // Outputs to CXL memory pool (buffer)
     output logic mem_req_valid_o,
@@ -76,6 +76,7 @@ module cxl_controller #(
         logic [NUM_NODES-1:0] worker;
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
+        logic any_conflict;
     } mod_req_t;
     idle_mod_t idle_mod_q, idle_mod_d;
     mod_req_t mod_req_q, mod_req_d;
@@ -86,6 +87,7 @@ module cxl_controller #(
     logic [NUM_NODES-1:0] cxl_inprog;
     logic cxl_busy;
     logic cxl_req_compl;
+    logic any_conflict;
 
     cxl_table #(
         .DATA_W(DATA_W),
@@ -110,7 +112,8 @@ module cxl_controller #(
         .check_out_o(cxl_checkout),
         .in_progress_o(cxl_inprog),
         .busy_o(cxl_busy),
-        .req_compl_o(cxl_req_compl)
+        .req_compl_o(cxl_req_compl),
+        .any_conflict_o(any_conflict)
     );
 
     // Set next register state
@@ -135,6 +138,7 @@ module cxl_controller #(
         mod_req_d.worker = idle_mod_q.worker;
         mod_req_d.request_type = idle_mod_q.request_type;
         mod_req_d.load_addr = idle_mod_q.load_addr;
+        mod_req_d.any_conflict = any_conflict; // latch onto conflict detection from cxl table
     end
 
     // ================ REQ Stage ================
@@ -166,11 +170,27 @@ module cxl_controller #(
             CMD_TX_ABORT : begin
                 // Completes within the controller itself (no memory request)
                 resp_valid_o = mod_req_q.valid ? mod_req_q.worker : '0;
-                comp_signal_o = mod_req_q.request_type;
+                comp_signal_o = COMP_ABORT;
             end
 
             CMD_TX_COMMIT: begin
-                // Placeholder
+                if(mod_req_d.any_conflict) begin
+                    // abort, directly respond abort to node
+                    resp_valid_o = mod_req_q.valid ? mod_req_q.worker : '0;
+                    comp_signal_o = COMP_ABORT;
+                end
+                // write
+                // Ship entire write set to memory buffer
+
+                
+
+
+
+
+
+
+
+
 
             end
 
@@ -202,8 +222,8 @@ module cxl_controller #(
 
             // When cxl_table completes, advance to REQ stage and re-open gate
             if (cxl_req_compl) begin
-                mod_req_q <= mod_req_d;
-                idle_mod_q <= '0;
+                mod_req_q <= mod_req_d; // mod_req_q only becomes populated one cycle after cxl_req_compl fired
+                idle_mod_q <= '0; // reset idle_mod registers
                 ctrl_ready_q <= 1'b1; // ready to accept next request
             end
 
@@ -212,21 +232,5 @@ module cxl_controller #(
                 mod_req_q <= '0;
         end
     end
-
-    // Debug: CXL Controller State
-    always @(negedge clk_i) begin
-        if (!rst_i) begin
-            if (idle_mod_q.valid)
-                $display("[%0t] CXL CONTROLLER [IDLE→MOD] node=%b cmd=%0d addr=%0d", $time, idle_mod_q.worker, idle_mod_q.request_type, idle_mod_q.load_addr);
-
-            if (mod_req_q.valid)
-                $display("[%0t] CXL CONTROLLER [MOD→REQ]  node=%b addr=%0d", $time, mod_req_q.worker, mod_req_q.load_addr);
-        end
-    end
-
-    wire dbg_mod_req_valid = mod_req_q.valid;
-    wire [1:0] dbg_mod_req_cmd = mod_req_q.request_type;
-    wire [NUM_NODES-1:0] dbg_mod_req_worker = mod_req_q.worker;
-    wire [ADDR_W-1:0] dbg_mod_req_addr = mod_req_q.load_addr;
 
 endmodule

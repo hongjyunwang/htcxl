@@ -2,12 +2,13 @@ module wr_buf #(
     parameter int NUM_NODES = 4,
     parameter int DATA_W = 64,
     parameter int ADDR_W = 64,
-    parameter int DEPTH = 16
+    parameter int DEPTH = 32
 )(
-    input  logic clk_i,
-    input  logic rst_i,
+    input logic clk_i,
+    input logic rst_i,
 
-    // Input from cxl controller
+    // Input from release_engine
+    // Push
     input logic push_valid_i, // handshake
     input logic push_we_i,
     input logic [ADDR_W-1:0] push_addr_i,
@@ -23,6 +24,7 @@ module wr_buf #(
     input logic [DATA_W-1:0] mem_rdata_i,
 
     // Output to memory pool
+    // Pop
     output logic pop_valid_o,
     output logic pop_we_o,
     output logic [ADDR_W-1:0] pop_addr_o,
@@ -54,7 +56,7 @@ module wr_buf #(
 
     logic full;
     logic empty;
-    assign full  = (count == DEPTH[PTR_W:0]);
+    assign full = (count == DEPTH[PTR_W:0]);
     assign empty = (count == '0);
 
     // Registers to store in-flight memory requests
@@ -114,7 +116,7 @@ module wr_buf #(
             // check no request is in flight
             if (!empty && !req_in_flight) begin
                 inflight_worker <= entry_to_read.worker;
-                req_in_flight   <= entry_to_read.we ? 1'b0 : 1'b1; // writes: no in-flight wait
+                req_in_flight <= entry_to_read.we ? 1'b0 : 1'b1; // writes: no in-flight wait
                 rd_ptr <= (rd_ptr == PTR_W'(DEPTH-1)) ? '0 : rd_ptr + 1'b1;
             end
 
