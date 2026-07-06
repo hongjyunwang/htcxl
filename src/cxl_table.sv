@@ -17,7 +17,6 @@ module cxl_table#(
     input logic [1:0] req_type_i, // 00: CMD_LOAD, 01: CMD_TX_ABORT, 10: CMD_TX_COMMIT
     input logic [NUM_NODES-1:0] req_node_i,
     input logic [ADDR_W-1:0] addr_i, // single address for LOAD
-    input logic [RELEASE_SET_DEPTH-1:0] release_valid_i,
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i,
     input logic [RELEASE_SET_DEPTH-1:0] release_is_read_i,
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i,
@@ -453,7 +452,6 @@ always_ff @(posedge clk_i or posedge rst_i) begin
             lat_req_type_q <= req_type_i;
             lat_req_node_q <= req_node_i;
             lat_load_addr_q <= addr_i;
-            lat_rel_valid_q <= release_valid_i;
             lat_rel_is_write_q <= release_is_write_i;
             lat_rel_is_read_q <= release_is_read_i;
             lat_rel_addr_q <= release_addr_i;

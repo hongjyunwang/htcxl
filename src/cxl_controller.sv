@@ -17,7 +17,6 @@ module cxl_controller #(
     input logic [ADDR_W-1:0] load_addr_i, // Used for CMD_LOAD
 
     // Release set inputs
-    input logic [RELEASE_SET_DEPTH-1:0] release_valid_i, // release set valid mark
     input logic [RELEASE_SET_DEPTH-1:0] release_is_write_i, // release set write mark
     input logic [RELEASE_SET_DEPTH-1:0] release_is_read_i, // release set read mark
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i, // release set address
@@ -31,11 +30,14 @@ module cxl_controller #(
     output logic [NUM_NODES-1:0] resp_valid_o, // handshake to signal completed request (only Tx_abort uses this)
     output logic [1:0] comp_signal_o, // type of request completed (only Tx_abort or abort in tx_commit uses this)
 
-    // Outputs to CXL memory pool (buffer)
+    // Outputs to CXL memory pool (engine)
     output logic mem_req_valid_o,
     output logic mem_we_o,
     output logic [ADDR_W-1:0] mem_addr_o,
-    output logic [DATA_W-1:0] mem_wdata_o,
+    // release set stuff
+    output logic [RELEASE_SET_DEPTH-1:0] release_is_write_o, // release set write mark
+    output logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_o, // release set address
+    output logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_o, // release set data
     output logic [NUM_NODES-1:0] mem_worker_o,
     output logic [1:0] mem_req_type_o
 );
@@ -64,7 +66,6 @@ module cxl_controller #(
         logic [NUM_NODES-1:0] worker;
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
-        logic [RELEASE_SET_DEPTH-1:0] release_valid;
         logic [RELEASE_SET_DEPTH-1:0] release_is_write;
         logic [RELEASE_SET_DEPTH-1:0] release_is_read;
         logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr;
@@ -76,6 +77,9 @@ module cxl_controller #(
         logic [NUM_NODES-1:0] worker;
         logic [1:0] request_type;
         logic [ADDR_W-1:0] load_addr;
+        logic [RELEASE_SET_DEPTH-1:0] release_is_write;
+        logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr;
+        logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data;
         logic any_conflict;
     } mod_req_t;
     idle_mod_t idle_mod_q, idle_mod_d;
@@ -102,7 +106,6 @@ module cxl_controller #(
         .req_type_i(idle_mod_q.request_type),
         .req_node_i(idle_mod_q.worker),
         .addr_i(idle_mod_q.load_addr),
-        .release_valid_i(idle_mod_q.release_valid),
         .release_is_write_i(idle_mod_q.release_is_write),
         .release_is_read_i(idle_mod_q.release_is_read),
         .release_addr_i(idle_mod_q.release_addr),
@@ -127,7 +130,6 @@ module cxl_controller #(
         idle_mod_d.worker = req_valid_i;
         idle_mod_d.request_type = tx_signal_i;
         idle_mod_d.load_addr = load_addr_i;
-        idle_mod_d.release_valid = release_valid_i;
         idle_mod_d.release_is_write = release_is_write_i;
         idle_mod_d.release_is_read = release_is_read_i;
         idle_mod_d.release_addr = release_addr_i;
@@ -136,6 +138,9 @@ module cxl_controller #(
         // MOD -> REQ
         mod_req_d.valid = idle_mod_q.valid;
         mod_req_d.worker = idle_mod_q.worker;
+        mod_req_d.release_is_write = idle_mod_d.release_is_write;
+        mod_req_d.release_addr = idle_mod_d.release_addr;
+        mod_req_d.release_data = idle_mod_d.release_data;
         mod_req_d.request_type = idle_mod_q.request_type;
         mod_req_d.load_addr = idle_mod_q.load_addr;
         mod_req_d.any_conflict = any_conflict; // latch onto conflict detection from cxl table
@@ -149,7 +154,6 @@ module cxl_controller #(
         mem_req_valid_o = '0;
         mem_we_o = '0;
         mem_addr_o = '0;
-        mem_wdata_o = '0;
         mem_worker_o = '0;
         mem_req_type_o = '0;
         resp_valid_o = '0;
@@ -160,7 +164,9 @@ module cxl_controller #(
                 mem_req_valid_o = mod_req_q.valid;
                 mem_we_o = '0;
                 mem_addr_o = mod_req_q.load_addr;
-                mem_wdata_o = '0;
+                release_is_write_o = '0;
+                release_addr_o = '0;
+                release_data_o = '0;
                 mem_worker_o = mod_req_q.worker;
                 mem_req_type_o = mod_req_q.request_type;
                 // LOAD completion no longer goes through this pipeline
@@ -181,17 +187,14 @@ module cxl_controller #(
                 end
                 // write
                 // Ship entire write set to memory buffer
-
-                
-
-
-
-
-
-
-
-
-
+                mem_req_valid_o = mod_req_q.valid;
+                mem_we_o = '1;
+                mem_addr_o = '0;
+                release_is_write_o = mod_req_q.release_is_write;
+                release_addr_o = mod_req_q.release_addr;
+                release_data_o = mod_req_q.release_data;
+                mem_worker_o = mod_req_q.worker;
+                mem_req_type_o = mod_req_q.request_type;
             end
 
             default: begin

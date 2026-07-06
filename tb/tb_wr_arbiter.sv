@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
 
-module tb_release_engine;
+module tb_wr_arbiter;
 
     localparam int DATA_W = 64;
     localparam int ADDR_W = 64;
@@ -34,7 +34,7 @@ module tb_release_engine;
     logic [1:0] push_req_type_o;
 
     // ================================ DUT ================================
-    release_engine #(
+    wr_arbiter #(
         .DATA_W(DATA_W),
         .ADDR_W(ADDR_W),
         .NUM_NODES(NUM_NODES),
@@ -290,7 +290,7 @@ module tb_release_engine;
     // Print pass/fail totals; $finish with nonzero on failure
     task automatic report();
         $display("==================================================");
-        $display(" release_engine TB summary");
+        $display(" wr_arbiter TB summary");
         $display("   beats observed : %0d", beats_seen);
         $display("   pass_cnt       : %0d", pass_cnt);
         $display("   fail_cnt       : %0d", fail_cnt);
@@ -299,7 +299,7 @@ module tb_release_engine;
 
         if (fail_cnt != 0 || exp_we_q.size() != 0) begin
             $display(" RESULT: FAIL");
-            $fatal(1, "release_engine TB failed");
+            $fatal(1, "wr_arbiter TB failed");
         end else begin
             $display(" RESULT: PASS");
             $finish;
@@ -317,8 +317,8 @@ module tb_release_engine;
         int prev_beats;
 
         // ---- waveform dump ----
-        $dumpfile("tb_release_engine.vcd");
-        $dumpvars(0, tb_release_engine);
+        $dumpfile("tb_wr_arbiter.vcd");
+        $dumpvars(0, tb_wr_arbiter);
 
         // ---- init ----
         pass_cnt = 0;

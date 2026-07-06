@@ -4,7 +4,7 @@
 // The controller stops running the streaming loop itself and goes back to being a clean 
 // fixed-latency pipeline
 
-module release_engine #(
+module wr_arbiter #(
     parameter int DATA_W = 64,
     parameter int ADDR_W = 64,
 
