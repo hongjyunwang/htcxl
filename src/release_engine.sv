@@ -4,20 +4,20 @@
 // The controller stops running the streaming loop itself and goes back to being a clean 
 // fixed-latency pipeline
 
-module release_engine(
+module release_engine #(
     parameter int DATA_W = 64,
     parameter int ADDR_W = 64,
 
     parameter int NUM_NODES = 4,
-    parameter int RELEASE_SET_DEPTH = 16
-    parameter int DEPTH = 32;
+    parameter int RELEASE_SET_DEPTH = 16,
+    parameter int DEPTH = 32
 )(
 
     input logic clk_i,
     input logic rst_i, 
 
     // Input from the cxl controller
-    input logic req_valid_i; // one cycle accept pulse
+    input logic req_valid_i, // one cycle accept pulse
     input logic [1:0] req_type_i,
     input logic [DATA_W-1:0] load_addr_i,
     input logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_i,
@@ -112,6 +112,7 @@ module release_engine(
                     // Load case
                     end else if (req_type_i == CMD_LOAD) begin
                         busy_q <= 1'b1;
+                        release_ptr_q <= 0; // reset for future commit
                     end
                     // read-only commit (COMMIT && !first_write_found): stay idle, done_o handles ack
                 end
@@ -124,12 +125,11 @@ module release_engine(
                     else if (has_next_write)
                         release_ptr_q <= next_write_idx;
                     else
+                        // Note that done_o is set high same cycle as very last push
                         busy_q <= 1'b0; // last commit write done
                 end
             end
         end
     end
-
-
 
 endmodule
