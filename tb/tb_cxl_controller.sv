@@ -50,7 +50,7 @@ module tb_cxl_controller;
     ) top_inst (
         .clk_i(clk),
         .rst_i(rst),
-        .req_valid_i(req_valid), 
+        .req_valid_i(req_valid),
         .tx_signal_i(tx_signal),
         .load_addr_i(load_addr),
         .release_is_write_i(release_is_write),
@@ -80,9 +80,9 @@ module tb_cxl_controller;
     //   CMD_LOAD       -> buf_resp_valid / buf_resp_worker / buf_resp_rdata (from wr_buf)
     //   CMD_TX_ABORT   -> ctrl_resp_valid / ctrl_comp_signal (from controller)
     task automatic issue_request(
-        input logic [1:0]           cmd,
+        input logic [1:0] cmd,
         input logic [NUM_NODES-1:0] node,
-        input logic [ADDR_W-1:0]    addr
+        input logic [ADDR_W-1:0] addr
     );
         @(negedge clk);
         while ((req_ready & node) == '0) @(negedge clk);  // wait until this node is ready
@@ -93,7 +93,7 @@ module tb_cxl_controller;
         $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)",
                 $time, cmd, node, addr);
 
-        @(posedge clk);        // controller accepts here (req_valid & req_ready)
+        @(posedge clk); // controller accepts here (req_valid & req_ready)
         @(negedge clk);
         req_valid = '0;
     endtask
@@ -124,30 +124,54 @@ module tb_cxl_controller;
         $display("[%0t] TB: preloaded mem[15] = %h", $time, top_inst.mem.mem[15]);
 
         issue_request(CMD_LOAD, 4'b0001, 64'd5);
-        issue_request(CMD_LOAD, 4'b0010, 64'd5);
-
         issue_request(CMD_LOAD, 4'b0001, 64'd10);
-        issue_request(CMD_LOAD, 4'b0100, 64'd10);
 
         // Then abort with all three in the release set
+        // begin
+        //     release_is_read = '0;
+
+        //     release_is_read[0] = 1'b1;
+        //     release_addr[0] = 64'd5;
+        //     release_is_read[1] = 1'b1;
+        //     release_addr[1] = 64'd10;
+
+        //     release_data = '0;
+
+        //     issue_request(CMD_TX_ABORT, 4'b0001, 64'd0);
+
+        //     release_is_read  = '0;
+        //     release_addr = '0;
+        //     release_data = '0;
+        // end
+
+        // Successful Commit with only .write
         begin
             release_is_write = '0;
-            release_is_read = '0;
 
-            release_is_read[0] = 1'b1;
+            release_is_write[0] = 1'b1;
             release_addr[0] = 64'd5;
-            release_is_read[1] = 1'b1;
+            release_data[0] = 64'hAAAA_BBBB_CCCC_DDDD;
+
+            release_is_write[1] = 1'b1;
             release_addr[1] = 64'd10;
+            release_data[1] = 64'hEEEE_EEEE_EEEE_EEEE;
 
-            release_data = '0;
-
-            issue_request(CMD_TX_ABORT, 4'b0001, 64'd0);
+            issue_request(CMD_TX_COMMIT, 4'b0001, 64'd0);
 
             release_is_write = '0;
-            release_is_read  = '0;
             release_addr = '0;
             release_data = '0;
         end
+
+        // Successful Commit with .write and .read variables
+
+
+        // Failed Commit with only .write
+
+
+        // Failed Commit with .write and .read variables
+
+
 
         // Let it run so the state trace prints
         repeat (12) @(posedge clk);

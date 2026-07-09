@@ -138,9 +138,9 @@ module cxl_controller #(
         // MOD -> REQ
         mod_req_d.valid = idle_mod_q.valid;
         mod_req_d.worker = idle_mod_q.worker;
-        mod_req_d.release_is_write = idle_mod_d.release_is_write;
-        mod_req_d.release_addr = idle_mod_d.release_addr;
-        mod_req_d.release_data = idle_mod_d.release_data;
+        mod_req_d.release_is_write = idle_mod_q.release_is_write;
+        mod_req_d.release_addr = idle_mod_q.release_addr;
+        mod_req_d.release_data = idle_mod_q.release_data;
         mod_req_d.request_type = idle_mod_q.request_type;
         mod_req_d.load_addr = idle_mod_q.load_addr;
         mod_req_d.any_conflict = any_conflict; // latch onto conflict detection from cxl table
@@ -158,6 +158,13 @@ module cxl_controller #(
         mem_req_type_o = '0;
         resp_valid_o = '0;
         comp_signal_o = '0;
+
+        release_is_write_o = '0;
+        release_addr_o = '0;
+        release_data_o = '0;
+
+        mem_worker_o = '0;
+        mem_req_type_o = '0;
 
         unique case (mod_req_q.request_type)
             CMD_LOAD: begin
