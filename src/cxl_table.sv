@@ -45,33 +45,36 @@ localparam logic [1:0] CMD_LOAD = 2'b00;
 localparam logic [1:0] CMD_TX_ABORT  = 2'b01;
 localparam logic [1:0] CMD_TX_COMMIT = 2'b10;
 
-logic ce_way0, ce_way1;
-logic we_way0, we_way1;
-logic [SET_IDX_W-1:0] set_index;
+logic re_way0, re_way1; // read enables  (READ stage)
+logic we_way0, we_way1; // write enables (WRITE stage)
+logic [SET_IDX_W-1:0] rd_set_index; // read address  (READ stage)
+logic [SET_IDX_W-1:0] wr_set_index; // write address (WRITE stage)
 logic [SRAM_W-1:0] wdata_way0, wdata_way1;
 logic [SRAM_W-1:0] rdata_way0, rdata_way1;
 
 sram #(
-    .DATA_W(SRAM_W),
+    .DATA_W(SRAM_W), 
     .DEPTH(NUM_SETS)
 ) sram_way0 (
     .clk_i(clk_i),
-    .ce_i(ce_way0),
     .we_i(we_way0),
-    .idx_i(set_index),
+    .waddr_i(wr_set_index),
     .wdata_i(wdata_way0),
+    .re_i(re_way0),
+    .raddr_i(rd_set_index),
     .rdata_o(rdata_way0)
 );
 
 sram #(
-    .DATA_W(SRAM_W),
+    .DATA_W(SRAM_W), 
     .DEPTH(NUM_SETS)
 ) sram_way1 (
     .clk_i(clk_i),
-    .ce_i(ce_way1),
     .we_i(we_way1),
-    .idx_i(set_index),
+    .waddr_i(wr_set_index),
     .wdata_i(wdata_way1),
+    .re_i(re_way1),
+    .raddr_i(rd_set_index),
     .rdata_o(rdata_way1)
 );
 
@@ -240,9 +243,10 @@ always_comb begin
     read_mod_d = read_mod_q;
     mod_write_d = mod_write_q;
 
-    ce_way0 = 1'b0; ce_way1 = 1'b0;
+    re_way0 = 1'b0; re_way1 = 1'b0;
     we_way0 = 1'b0; we_way1 = 1'b0;
-    set_index = cur_set_index;
+    rd_set_index = cur_set_index;
+    wr_set_index = mod_write_q.set_index;
     wdata_way0 = '0; wdata_way1 = '0;
 
     busy_o = 1'b1;
@@ -287,12 +291,11 @@ always_comb begin
 
         // ================ READ Stage ================
         SEQ_READ: begin
-            // Issue SRAM read for current entry — no hazard check needed
-            ce_way0 = 1'b1; // read
-            ce_way1 = 1'b1; // read
-            we_way0 = 1'b0; // not write
-            we_way1 = 1'b0; // not write
-            set_index = cur_set_index;
+            // Issue SRAM read for current entry
+            // read both
+            re_way0 = 1'b1;
+            re_way1 = 1'b1;
+            rd_set_index = cur_set_index;
 
             // Fill READ->MOD register
             read_mod_d.valid = 1'b1; // move to MOD
@@ -411,13 +414,11 @@ always_comb begin
 
     // ================ WRITE stage ================
     if (mod_write_q.valid) begin
-        set_index = mod_write_q.set_index;
+        wr_set_index = mod_write_q.set_index;
         if (write_way == 1'b0) begin
-            ce_way0 = 1'b1; // write not read
             we_way0 = 1'b1;
             wdata_way0 = write_packed_word;
         end else begin
-            ce_way1 = 1'b1;
             we_way1 = 1'b1;
             wdata_way1 = write_packed_word;
         end
@@ -503,10 +504,5 @@ always @(posedge clk_i) begin
     end
 end
 
-always @(posedge clk_i) if (!rst_i) begin
-    $strobe("[%0t] st=%0d rmq.v=%0b mwq.v=%0b we0=%0b we1=%0b widx=%0d wway=%0b",
-        $time, seq_state_q, read_mod_q.valid, mod_write_q.valid,
-        we_way0, we_way1, mod_write_q.set_index, write_way);
-end
 
 endmodule

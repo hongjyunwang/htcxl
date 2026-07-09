@@ -298,6 +298,54 @@ module tb_cxl_controller;
         repeat (20) @(posedge clk); #1;
         expect_mem(64'd30, 64'hDEAD_BEEF_0000_0006); // unchanged -> abort honored
 
+        top_inst.mem.mem[8]  = 64'hCAFE_0000_0000_0008; // E0 read way, set 8  (clean)
+        top_inst.mem.mem[12] = 64'hCAFE_0000_0000_000C; // E1 read way, set 12 (filler)
+        top_inst.mem.mem[16] = 64'hDEAD_BEEF_0000_0016; // E2 write target, set 16 -- must NOT change
+
+        // ==================================================================
+        // 3-ENTRY PORT-COLLISION PROBE (deep overlap: SEQ_READ(E2) || WRITE(E0))
+        //   E0: read  addr 8  -> set 8   (node0's own checkout; CLEAN set)
+        //   E1: read  addr 12 -> set 12  (filler, keeps pipeline 3-deep)
+        //   E2: WRITE addr 16 -> set 16  (node1 holds it -> REAL conflict)
+        //
+        // CORRECT arbitration: E2 reads set 16, sees node1's checkout,
+        //   conflict -> whole commit aborts -> mem[16] stays DEAD_BEEF...0016.
+        // COLLISION: E2's SEQ_READ is hijacked to set 8 (E0's write-back),
+        //   sees the clean set, misses the conflict -> false commit ->
+        //   mem[16] := 1616...  AND the [MOD] line for E2 prints the WRONG set.
+        // ==================================================================
+        begin
+            // node0 loads its two read variables (legit checkouts to release)
+            issue_request(CMD_LOAD, 4'b0001, 64'd8);
+            issue_request(CMD_LOAD, 4'b0001, 64'd12);
+            // node1 loads the write variable -> foreign checkout in set 16
+            issue_request(CMD_LOAD, 4'b0010, 64'd16);
+
+            release_is_write = '0;
+            release_is_read  = '0;
+            release_addr = '0;
+            release_data = '0;
+
+            release_is_read[0]  = 1'b1; // E0: read, set 8  (clean)
+            release_addr[0] = 64'd8;
+
+            release_is_read[1]  = 1'b1; // E1: read, set 12 (filler)
+            release_addr[1] = 64'd12;
+
+            release_is_write[2] = 1'b1; // E2: WRITE, set 16 (conflicted)
+            release_addr[2] = 64'd16;
+            release_data[2] = 64'h1616_1616_1616_1616;
+
+            issue_request(CMD_TX_COMMIT, 4'b0001, 64'd0);
+
+            release_is_write = '0;
+            release_is_read  = '0;
+            release_addr     = '0;
+            release_data     = '0;
+        end
+        repeat (20) @(posedge clk); #1;
+        expect_mem(64'd16, 64'hDEAD_BEEF_0000_0016); // FAIL here == false commit == collision
+
         // Let it run so the state trace prints
         repeat (12) @(posedge clk);
 
