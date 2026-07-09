@@ -452,6 +452,7 @@ always_ff @(posedge clk_i or posedge rst_i) begin
             lat_req_type_q <= req_type_i;
             lat_req_node_q <= req_node_i;
             lat_load_addr_q <= addr_i;
+            lat_rel_valid_q <= release_is_write_i | release_is_read_i;
             lat_rel_is_write_q <= release_is_write_i;
             lat_rel_is_read_q <= release_is_read_i;
             lat_rel_addr_q <= release_addr_i;
@@ -500,6 +501,12 @@ always @(posedge clk_i) begin
         if (req_compl_o)
             $display("[%0t] CXL TABLE [DONE]",  $time);
     end
+end
+
+always @(posedge clk_i) if (!rst_i) begin
+    $strobe("[%0t] st=%0d rmq.v=%0b mwq.v=%0b we0=%0b we1=%0b widx=%0d wway=%0b",
+        $time, seq_state_q, read_mod_q.valid, mod_write_q.valid,
+        we_way0, we_way1, mod_write_q.set_index, write_way);
 end
 
 endmodule

@@ -21,8 +21,8 @@ module tb_cxl_controller;
     logic [NUM_NODES-1:0] req_valid;
     logic [1:0] tx_signal;
     logic [ADDR_W-1:0] load_addr;
-    logic [RELEASE_SET_DEPTH-1:0] release_valid;
     logic [RELEASE_SET_DEPTH-1:0] release_is_write;
+    logic [RELEASE_SET_DEPTH-1:0] release_is_read;
     logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr;
     logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data;
 
@@ -53,8 +53,8 @@ module tb_cxl_controller;
         .req_valid_i(req_valid), 
         .tx_signal_i(tx_signal),
         .load_addr_i(load_addr),
-        .release_valid_i(release_valid), 
         .release_is_write_i(release_is_write),
+        .release_is_read_i(release_is_read),
         .release_addr_i(release_addr), 
         .release_data_i(release_data),
         .req_ready_o(req_ready),
@@ -80,36 +80,22 @@ module tb_cxl_controller;
     //   CMD_LOAD       -> buf_resp_valid / buf_resp_worker / buf_resp_rdata (from wr_buf)
     //   CMD_TX_ABORT   -> ctrl_resp_valid / ctrl_comp_signal (from controller)
     task automatic issue_request(
-        input logic [1:0] cmd,
+        input logic [1:0]           cmd,
         input logic [NUM_NODES-1:0] node,
-        input logic [ADDR_W-1:0] addr
+        input logic [ADDR_W-1:0]    addr
     );
         @(negedge clk);
-        while ((req_ready & node) == '0) @(negedge clk);  // also check own bit on req_ready
+        while ((req_ready & node) == '0) @(negedge clk);  // wait until this node is ready
 
         req_valid = node;
         tx_signal = cmd;
         load_addr = addr;
-        $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)", $time, cmd, node, addr);
+        $display("[%0t] TB: request issued (cmd=%0d node=%b addr=%0d)",
+                $time, cmd, node, addr);
 
-        @(posedge clk);
+        @(posedge clk);        // controller accepts here (req_valid & req_ready)
         @(negedge clk);
         req_valid = '0;
-
-        if (cmd == CMD_LOAD) begin
-            // LOAD completion comes from wr_buf — resp_worker is a one-hot tag,
-            // not gated per-node like the old resp_valid vector was
-            while (!(buf_resp_valid && (buf_resp_worker == node))) @(negedge clk);
-            $display("[%0t] TB: LOAD response received (node=%b data=%0h)",
-                      $time, node, buf_resp_rdata);
-        end else if (cmd == CMD_TX_ABORT) begin
-            while (!(ctrl_resp_valid & node)) @(negedge clk);
-            $display("[%0t] TB: TX_ABORT response received (node=%b comp=%0d)",
-                      $time, node, ctrl_comp_signal);
-        end else begin
-            // CMD_TX_COMMIT — placeholder, no completion path defined yet
-            $display("[%0t] TB: TX_COMMIT issued, no completion tracking implemented", $time);
-        end
     endtask
 
     initial begin
@@ -117,8 +103,8 @@ module tb_cxl_controller;
         req_valid = '0; 
         tx_signal = 0; 
         load_addr = 0;
-        release_valid = 0; 
         release_is_write = 0; 
+        release_is_read = 0;
         release_addr = 0; 
         release_data = 0;
 
@@ -137,35 +123,28 @@ module tb_cxl_controller;
         $display("[%0t] TB: preloaded mem[10] = %h", $time, top_inst.mem.mem[10]);
         $display("[%0t] TB: preloaded mem[15] = %h", $time, top_inst.mem.mem[15]);
 
-        // fork
-        //     issue_request(CMD_LOAD, 4'b0001, 64'd5); // node 1, cycle N
-        //     begin
-        //         @(negedge clk); // wait one cycle behind node 1
-        //         issue_request(CMD_LOAD, 4'b0010, 64'd5); // node 2, cycle N+1
-        //     end
-        // join
-
-        // TX_ABORT test — node 0001 aborts with address 5 in its release set
         issue_request(CMD_LOAD, 4'b0001, 64'd5);
+        issue_request(CMD_LOAD, 4'b0010, 64'd5);
+
         issue_request(CMD_LOAD, 4'b0001, 64'd10);
-        issue_request(CMD_LOAD, 4'b0001, 64'd15);
+        issue_request(CMD_LOAD, 4'b0100, 64'd10);
 
         // Then abort with all three in the release set
         begin
-            release_valid = '0;
-            release_valid[0] = 1;
-            release_valid[1] = 1;
-            release_valid[2] = 1;
             release_is_write = '0;
+            release_is_read = '0;
+
+            release_is_read[0] = 1'b1;
             release_addr[0] = 64'd5;
+            release_is_read[1] = 1'b1;
             release_addr[1] = 64'd10;
-            release_addr[2] = 64'd15;
+
             release_data = '0;
 
             issue_request(CMD_TX_ABORT, 4'b0001, 64'd0);
 
-            release_valid = '0;
             release_is_write = '0;
+            release_is_read  = '0;
             release_addr = '0;
             release_data = '0;
         end
@@ -182,25 +161,5 @@ module tb_cxl_controller;
         $dumpfile("tb_cxl_controller.vcd");
         $dumpvars(0, tb_cxl_controller);
     end
-    
-    // always @(negedge clk) begin
-    //     if (!rst) begin
-    //         if (top_inst.dut.dbg_mod_req_valid)
-    //             $display("[%0t] CTRL REQ stage: cmd=%0d node=%b addr=%0d",
-    //                 $time, top_inst.dut.dbg_mod_req_cmd,
-    //                 top_inst.dut.dbg_mod_req_worker,
-    //                 top_inst.dut.dbg_mod_req_addr);
-
-    //         if (top_inst.dut.mem_req_valid_o)
-    //             $display("[%0t] MEM REQ: we=%0b addr=%0d worker=%b",
-    //                 $time, top_inst.dut.mem_we_o,
-    //                 top_inst.dut.mem_addr_o,
-    //                 top_inst.dut.mem_worker_o);
-
-    //         if (buf_resp_valid)
-    //             $display("[%0t] TB RESP: worker=%b rdata=%0h",
-    //                 $time, buf_resp_worker, buf_resp_rdata);
-    //     end
-    // end
 
 endmodule

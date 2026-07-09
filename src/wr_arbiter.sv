@@ -28,7 +28,7 @@ module wr_arbiter #(
     // Output to the cxl controller
     output logic busy_o,
     output logic done_o,
-    
+
     // Input from the memory buffer
     input logic push_ready_i,
 
@@ -48,6 +48,16 @@ module wr_arbiter #(
     // States
     logic busy_q; // currently pushing read/write requests into the memory buffer
     logic [PTR_W-1:0] release_ptr_q;
+
+
+    // ================ Latched job payload ================
+    // captured at accept, drives outputs during drain
+    logic [1:0] req_type_q;
+    logic [DATA_W-1:0] load_addr_q;
+    logic [RELEASE_SET_DEPTH-1:0][ADDR_W-1:0] release_addr_q;
+    logic [RELEASE_SET_DEPTH-1:0] release_is_write_q;
+    logic [RELEASE_SET_DEPTH-1:0][DATA_W-1:0] release_data_q;
+    logic [NUM_NODES-1:0] worker_q;
 
     // ================ Release Set Pointer Manipulation ================
     // Find first write index
@@ -74,58 +84,65 @@ module wr_arbiter #(
         next_write_idx = release_ptr_q;
         has_next_write = 1'b0;
         for (int i = 0; i < RELEASE_SET_DEPTH; i++) begin
-            if (!has_next_write && (i > release_ptr_q) && release_is_write_i[i]) begin
+            if (!has_next_write && (i > release_ptr_q) && release_is_write_q[i]) begin
                 next_write_idx = PTR_W'(i);
                 has_next_write = 1'b1;
             end
         end
     end
-
+    
     // ================ Combinational output drive ================
     always_comb begin
-        push_valid_o = busy_q; // if busy = 1, output is valid
-        push_we_o = (req_type_i == CMD_TX_COMMIT) ? 1'b1 : 1'b0;
-        push_addr_o = (req_type_i == CMD_TX_COMMIT) ? release_addr_i[release_ptr_q] : load_addr_i;
-        push_wdata_o = release_data_i[release_ptr_q];
-        push_worker_o = worker_i;
-        push_req_type_o = req_type_i;
+        push_valid_o = busy_q;
+        push_we_o = (req_type_q == CMD_TX_COMMIT) ? 1'b1 : 1'b0;
+        push_addr_o = (req_type_q == CMD_TX_COMMIT) ? release_addr_q[release_ptr_q] : load_addr_q;
+        push_wdata_o = release_data_q[release_ptr_q];
+        push_worker_o = worker_q;
+        push_req_type_o = req_type_q;
     end
     assign busy_o = busy_q;
 
     // ================ Sequencer ================
     logic accept_beat; // working when the buffer downstream can accept a push
     assign accept_beat = push_valid_o && push_ready_i;
-    assign done_o = (accept_beat && req_type_i == CMD_TX_COMMIT && !has_next_write) || // last commit write
-                    (accept_beat && req_type_i == CMD_LOAD); // single load beat
+    assign done_o = (accept_beat && req_type_q == CMD_TX_COMMIT && !has_next_write) || // last commit write
+                    (accept_beat && req_type_q == CMD_LOAD); // single load beat
     always_ff @(posedge clk_i or posedge rst_i) begin
         if (rst_i) begin
-            busy_q <= 1'b0;
+            busy_q        <= 1'b0;
             release_ptr_q <= '0;
         end else begin
-            // If not currently busy, accept a request
             if (!busy_q) begin
                 if (req_valid_i) begin
-                    // Commit case
                     if (req_type_i == CMD_TX_COMMIT && first_write_found) begin
                         busy_q <= 1'b1;
                         release_ptr_q <= first_write_idx;
-                    // Load case
+                        // latch payload
+                        req_type_q <= req_type_i;
+                        load_addr_q <= load_addr_i;
+                        release_addr_q <= release_addr_i;
+                        release_is_write_q <= release_is_write_i;
+                        release_data_q <= release_data_i;
+                        worker_q <= worker_i;
                     end else if (req_type_i == CMD_LOAD) begin
                         busy_q <= 1'b1;
-                        release_ptr_q <= 0; // reset for future commit
+                        release_ptr_q <= '0;
+                        // latch payload
+                        req_type_q <= req_type_i;
+                        load_addr_q <= load_addr_i;
+                        release_addr_q <= release_addr_i;
+                        release_is_write_q <= release_is_write_i;
+                        release_data_q <= release_data_i;
+                        worker_q <= worker_i;
                     end
-                    // read-only commit (COMMIT && !first_write_found): stay idle, done_o handles ack
                 end
-            // Already processing a request
             end else begin
                 if (accept_beat) begin
-                    if (req_type_i == CMD_LOAD)
+                    if (req_type_q == CMD_LOAD)
                         busy_q <= 1'b0; // one-beat load done
-                        // LOAD completes in one cycle
                     else if (has_next_write)
                         release_ptr_q <= next_write_idx;
                     else
-                        // Note that done_o is set high same cycle as very last push
                         busy_q <= 1'b0; // last commit write done
                 end
             end
