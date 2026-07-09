@@ -187,22 +187,24 @@ module cxl_controller #(
             end
 
             CMD_TX_COMMIT: begin
-                if(mod_req_d.any_conflict) begin
-                    // abort, directly respond abort to node
-                    resp_valid_o = mod_req_q.valid ? mod_req_q.worker : '0;
-                    comp_signal_o = COMP_ABORT;
-                end
-                // write
-                // Ship entire write set to memory buffer
+            if (mod_req_q.any_conflict) begin
+                // conflict -> abort, suppress the write entirely
+                resp_valid_o = mod_req_q.valid ? mod_req_q.worker : '0;
+                comp_signal_o = COMP_ABORT;
+                mem_req_valid_o = 1'b0; // suppress write
+            end else begin
+                // clean commit -> ship the write set
                 mem_req_valid_o = mod_req_q.valid;
-                mem_we_o = '1;
+                mem_we_o = 1'b1;
                 mem_addr_o = '0;
                 release_is_write_o = mod_req_q.release_is_write;
                 release_addr_o = mod_req_q.release_addr;
                 release_data_o = mod_req_q.release_data;
                 mem_worker_o = mod_req_q.worker;
                 mem_req_type_o = mod_req_q.request_type;
+                // optional: signal COMP_COMMIT here if nodes consume commit acks
             end
+        end
 
             default: begin
                 // Placeholder
