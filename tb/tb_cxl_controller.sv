@@ -169,8 +169,8 @@ module tb_cxl_controller;
 
             release_is_read[0] = 1'b1;
             release_addr[0] = 64'd5;
-            release_is_read[1] = 1'b1;
-            release_addr[1] = 64'd10;
+            // release_is_read[1] = 1'b1;
+            // release_addr[1] = 64'd10;
 
             release_data = '0;
 

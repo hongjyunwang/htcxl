@@ -88,7 +88,6 @@ module cxl_controller #(
     // ================ Building CXL Table ================
     logic cxl_hit;
     logic [NUM_NODES-1:0] cxl_checkout;
-    logic [NUM_NODES-1:0] cxl_inprog;
     logic cxl_busy;
     logic cxl_req_compl;
     logic any_conflict;
@@ -113,7 +112,6 @@ module cxl_controller #(
 
         .hit_o(cxl_hit),
         .check_out_o(cxl_checkout),
-        .in_progress_o(cxl_inprog),
         .busy_o(cxl_busy),
         .req_compl_o(cxl_req_compl),
         .any_conflict_o(any_conflict)

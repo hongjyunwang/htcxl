@@ -82,7 +82,7 @@ module top #(
         .release_addr_i(release_addr_i),
         .release_data_i(release_data_i),
 
-        .buffer_full_i(arb_busy),   // downstream job slot busy (was !buf_push_ready)
+        .buffer_full_i(arb_busy), // downstream job slot busy (was !buf_push_ready)
 
         .req_ready_o(req_ready_o),
         .resp_valid_o(ctrl_resp_valid_o),

@@ -25,7 +25,6 @@ module cxl_table#(
     // outputs to cxl controller
     output logic hit_o,
     output logic [NUM_NODES-1:0] check_out_o,
-    output logic [NUM_NODES-1:0] in_progress_o,
     output logic busy_o, 
     output logic req_compl_o, // completion signal of ENTIRE request, not one memory fetch
     output logic any_conflict_o // used for tx_commit
@@ -97,9 +96,7 @@ task automatic unpack_entry(
     output logic valid,
     output logic [TAG_W-1:0] tag,
     output logic [NUM_NODES-1:0] checkout_vec,
-    output logic [NUM_NODES-1:0] inprog_vec
 );
-    inprog_vec = word[NUM_NODES-1 : 0];
     checkout_vec = word[2*NUM_NODES-1 : NUM_NODES];
     tag = word[2*NUM_NODES + TAG_W - 1 : 2*NUM_NODES];
     valid = word[SRAM_W-1];
@@ -109,9 +106,8 @@ function automatic logic [SRAM_W-1:0] pack_entry(
     input logic valid,
     input logic [TAG_W-1:0] tag,
     input logic [NUM_NODES-1:0] checkout_vec,
-    input logic [NUM_NODES-1:0] inprog_vec
 );
-    return {valid, tag, checkout_vec, inprog_vec};
+    return {valid, tag, checkout_vec};
 endfunction
 
 // ================ FSM ================
@@ -177,11 +173,10 @@ end
 logic r_valid0, r_valid1;
 logic [TAG_W-1:0] r_tag0, r_tag1;
 logic [NUM_NODES-1:0] r_checkout0, r_checkout1;
-logic [NUM_NODES-1:0] r_inprog0, r_inprog1;
 // Remember that rdata_way0 and rdata_way1 are data returned from sram
 always_comb begin
-    unpack_entry(rdata_way0, r_valid0, r_tag0, r_checkout0, r_inprog0);
-    unpack_entry(rdata_way1, r_valid1, r_tag1, r_checkout1, r_inprog1);
+    unpack_entry(rdata_way0, r_valid0, r_tag0, r_checkout0);
+    unpack_entry(rdata_way1, r_valid1, r_tag1, r_checkout1);
 end
 
 // Deciding which way to allocate to when allocating new table entry
@@ -217,7 +212,6 @@ typedef struct packed {
     logic hit_way;
     logic alloc_way;
     logic [NUM_NODES-1:0] new_checkout;
-    logic [NUM_NODES-1:0] new_inprog;
     logic new_valid;
 } mod_write_t;
 
@@ -227,7 +221,7 @@ mod_write_t mod_write_q, mod_write_d;
 // Local storage for MOD stage
 logic mod_hit0, mod_hit1, mod_any_hit;
 logic mod_hit_way;
-logic [NUM_NODES-1:0] mod_hit_checkout, mod_hit_inprog;
+logic [NUM_NODES-1:0] mod_hit_checkout;
 logic mod_alloc_way;
 logic [SRAM_W-1:0] write_packed_word;
 logic write_way;
@@ -253,7 +247,6 @@ always_comb begin
     req_compl_o = 1'b0;
     hit_o = 1'b0;
     check_out_o = '0;
-    in_progress_o = '0;
 
     entry_is_write_conflict = '0;
 
@@ -264,7 +257,6 @@ always_comb begin
     mod_any_hit = mod_hit0 || mod_hit1;
     mod_hit_way = mod_hit1;
     mod_hit_checkout = mod_hit1 ? r_checkout1 : r_checkout0;
-    mod_hit_inprog = mod_hit1 ? r_inprog1 : r_inprog0;
     mod_alloc_way = (!r_valid0) ? 1'b0 : (!r_valid1) ? 1'b1 : lru_q[read_mod_q.set_index];
 
     // WRITE stage combinational logic
@@ -273,7 +265,6 @@ always_comb begin
         mod_write_q.new_valid,
         mod_write_q.tag,
         mod_write_q.new_checkout,
-        mod_write_q.new_inprog
     );
 
     // ---- Sequencer FSM ----
@@ -368,12 +359,10 @@ always_comb begin
                 mod_write_d.new_checkout = mod_any_hit ?
                     (mod_hit_checkout | read_mod_q.req_node) :
                     read_mod_q.req_node;
-                mod_write_d.new_inprog = mod_hit_inprog & ~read_mod_q.req_node;
                 mod_write_d.new_valid = 1'b1;
             end
             CMD_TX_ABORT: begin
                 mod_write_d.new_checkout = mod_hit_checkout & ~read_mod_q.req_node;
-                mod_write_d.new_inprog = mod_hit_inprog & ~read_mod_q.req_node;
                 mod_write_d.new_valid = ((mod_hit_checkout & ~read_mod_q.req_node) != '0);
             end
             CMD_TX_COMMIT: begin
@@ -398,7 +387,6 @@ always_comb begin
             end
             default: begin
                 mod_write_d.new_checkout = mod_hit_checkout;
-                mod_write_d.new_inprog = mod_hit_inprog;
                 mod_write_d.new_valid = mod_any_hit;
             end
         endcase
@@ -406,7 +394,6 @@ always_comb begin
         // Drive hit outputs for LOAD
         hit_o = mod_any_hit;
         check_out_o = mod_hit_checkout;
-        in_progress_o = mod_hit_inprog;
     end else begin
         // Nothing more to do for this request
         mod_write_d.valid = 1'b0;
@@ -478,29 +465,6 @@ always @(posedge clk_i) begin
                 $time, req_type_i, req_node_i, addr_i);
         if (req_compl_o)
             $display("[%0t] CXL TABLE: request complete", $time);
-    end
-end
-
-always @(posedge clk_i) begin
-    if (!rst_i) begin
-        if (seq_state_q == SEQ_READ)
-            $display("[%0t] CXL TABLE [SEQ_READ]: ptr=%0d cur_addr=%0h cur_set=%0d cur_tag=%0h",
-                $time, seq_ptr_q, cur_addr, cur_set_index, cur_tag);
-        if (read_mod_q.valid)
-            $display("[%0t] CXL TABLE [MOD]:      cmd=%0d node=%0b tag=%0h set=%0d hit=%0b checkout=%0b inprog=%0b",
-                $time, read_mod_q.req_type, read_mod_q.req_node,
-                read_mod_q.tag, read_mod_q.set_index,
-                mod_any_hit, mod_hit_checkout, mod_hit_inprog);
-        if (mod_write_q.valid)
-            $display("[%0t] CXL TABLE [WRITE]:    way=%0b set=%0d valid=%0b tag=%0h new_checkout=%0b new_inprog=%0b",
-                $time, write_way, mod_write_q.set_index,
-                mod_write_q.new_valid, mod_write_q.tag,
-                mod_write_q.new_checkout, mod_write_q.new_inprog);
-        if (seq_state_q == SEQ_DRAIN)
-            $display("[%0t] CXL TABLE [DRAIN]:    read_mod_valid=%0b mod_write_valid=%0b",
-                $time, read_mod_q.valid, mod_write_q.valid);
-        if (req_compl_o)
-            $display("[%0t] CXL TABLE [DONE]",  $time);
     end
 end
 
